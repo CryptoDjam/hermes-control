@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Hermes Control — architecture (v0.3)</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm; }
+  * { box-sizing: border-box; }
+  body { font: 11pt/1.45 "Inter", "Cantarell", "Noto Sans", system-ui, sans-serif; color: #1a1d2e; margin: 0; }
+  h1 { font-size: 24pt; margin: 0 0 4pt; }
+  h2 { font-size: 16pt; margin: 0 0 8pt; padding-bottom: 4pt; border-bottom: 2px solid #4f6bd8; }
+  h3 { font-size: 12pt; margin: 14pt 0 4pt; color: #2f3f8f; }
+  p { margin: 5pt 0; }
+  .page { page-break-after: always; }
+  .page:last-child { page-break-after: auto; }
+  .sous { color: #555c75; font-size: 11.5pt; margin-bottom: 14pt; }
+  .encadre { background: #eef2fb; border-left: 4px solid #4f6bd8; padding: 7pt 10pt; margin: 8pt 0; border-radius: 3pt; }
+  .attention { background: #fff4e5; border-left-color: #e08a1e; }
+  table { border-collapse: collapse; width: 100%; font-size: 10pt; margin: 6pt 0; }
+  th, td { border: 1px solid #c9cfe3; padding: 4pt 6pt; vertical-align: top; text-align: left; }
+  th { background: #e8ecf8; }
+  code, .mono { font-family: "JetBrains Mono", "Cascadia Code", "DejaVu Sans Mono", monospace; font-size: 9.5pt; background: #f1f3f9; padding: 0 3pt; border-radius: 2pt; }
+  pre { font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 9pt; line-height: 1.35; background: #f6f7fb; border: 1px solid #dfe3f0; padding: 8pt; border-radius: 4pt; white-space: pre; }
+  figure { margin: 10pt 0; }
+  figcaption { font-size: 9.5pt; color: #555c75; margin-top: 3pt; }
+  svg { width: 100%; height: auto; display: block; }
+  .ok { color: #1f8a4c; font-weight: 600; } .afaire { color: #b45309; font-weight: 600; }
+  ol.num > li, ul.liste > li { margin: 4pt 0; }
+</style>
+</head>
+<body>
+
+<!-- ================= PAGE 1 ================= -->
+<section class="page">
+  <h1>Hermes Control — Hermes moteur, Paperclip aux commandes</h1>
+  <div class="sous">Plugin Paperclip signé Cyril M · version 0.3.0, état au 3 octobre 2026 (soir) · code : <code>~/.claude/projects/hermes-control/</code></div>
+
+  <h2>1. Le principe</h2>
+  <p><strong>Paperclip est le maître.</strong> Pour chaque agent, Paperclip envoie cinq données : son <strong>nom</strong>, son <strong>working directory</strong>, son <strong>provider</strong>, son <strong>modèle</strong>, son <strong>thinking</strong>. Avec le nom, Hermes Control trouve le profil Hermes correspondant ; provider / modèle / thinking y sont écrits et Hermes tourne dessus. Dans l'autre sens, les menus Provider et Model du formulaire de base de l'agent listent ce que Hermes connaît. Rien d'autre n'entre ni ne sort. Deux pièces dans un même projet : un <em>adaptateur</em> (remplace l'adaptateur Hermes intégré) et un <em>plugin</em> (synchro + une vue « instances »).</p>
+
+  <figure>
+  <svg viewBox="0 0 760 420" xmlns="http://www.w3.org/2000/svg" font-family="Inter, Cantarell, sans-serif" font-size="12">
+    <defs><marker id="f" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#4f6bd8"/></marker>
+    <marker id="g" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#7a8199"/></marker></defs>
+
+    <!-- Paperclip -->
+    <rect x="10" y="10" width="330" height="400" rx="10" fill="#eef2fb" stroke="#4f6bd8" stroke-width="1.5"/>
+    <text x="24" y="34" font-size="15" font-weight="700" fill="#2f3f8f">Paperclip (CDjam)</text>
+    <text x="24" y="52" fill="#555c75">serveur Node, http://100.86.58.58:3100</text>
+
+    <rect x="24" y="66" width="300" height="118" rx="6" fill="#fff" stroke="#9fb0e6"/>
+    <text x="34" y="86" font-weight="700">Formulaire de base de l'agent (Harness / Runtime)</text>
+    <text x="34" y="106">Working directory · Provider ▾ · Model ▾ · Thinking ▾</text>
+    <text x="34" y="124">→ menus remplis par l'adaptateur Hermes Control</text>
+    <text x="34" y="142">   (providers et modèles connus de Hermes)</text>
+    <text x="34" y="160">• Barre latérale « Hermes » → vue « instances » (lecture seule)</text>
+    <text x="34" y="177" fill="#555c75" font-size="11">aucune autre page, aucun réglage</text>
+
+    <rect x="24" y="200" width="300" height="118" rx="6" fill="#fff" stroke="#9fb0e6"/>
+    <text x="34" y="220" font-weight="700">Adaptateur Hermes Control (remplace hermes_local)</text>
+    <text x="34" y="240">nom de l'agent → profil Hermes → HERMES_HOME</text>
+    <text x="34" y="258">menus Provider / Model = listes de Hermes · detectModel</text>
+    <text x="34" y="276" font-weight="700">Plugin (worker) : Paperclip → Hermes</text>
+    <text x="34" y="294" fill="#555c75" font-size="11">agent.updated · vue instances · job 5 min → hermes config set</text>
+    <text x="34" y="309" fill="#555c75" font-size="11">model.provider · model.default · reasoning_effort (si ≠ auto)</text>
+
+    <rect x="24" y="334" width="300" height="64" rx="6" fill="#fff" stroke="#9fb0e6"/>
+    <text x="34" y="354" font-weight="700">Agents Paperclip (type hermes_local)</text>
+    <text x="34" y="372">Chef · Assistant · Chercheur · CMO · Apolline M</text>
+    <text x="34" y="389">5 données envoyées : nom, working dir, provider, modèle, thinking</text>
+
+    <!-- flèches -->
+    <line x1="174" y1="184" x2="174" y2="200" stroke="#4f6bd8" stroke-width="1.5" marker-end="url(#f)"/>
+    <line x1="324" y1="366" x2="400" y2="366" stroke="#4f6bd8" stroke-width="1.5" marker-end="url(#f)"/>
+    <text x="332" y="358" font-size="10.5" fill="#2f3f8f">par le nom</text>
+    <line x1="324" y1="258" x2="400" y2="258" stroke="#4f6bd8" stroke-width="1.5" marker-end="url(#f)"/>
+    <text x="334" y="236" font-size="10.5" fill="#2f3f8f">synchro</text><text x="338" y="272" font-size="10.5" fill="#2f3f8f">listes</text>
+
+    <!-- Hermes -->
+    <rect x="400" y="10" width="350" height="400" rx="10" fill="#f3f7f2" stroke="#3a8f5a" stroke-width="1.5"/>
+    <text x="414" y="34" font-size="15" font-weight="700" fill="#276b43">Hermes (3 instances sur le même PC)</text>
+    <text x="414" y="52" fill="#555c75">~/Projects/ProjetC/hermes/profils/…</text>
+
+    <g>
+      <rect x="414" y="66" width="322" height="70" rx="6" fill="#fff" stroke="#9cc7aa"/>
+      <text x="424" y="84" font-weight="700">direction</text><text x="500" y="84" fill="#555c75">tableau de bord :9119</text>
+      <text x="424" y="102">default = Chef · profiles/assistant = Assistant</text>
+      <text x="424" y="120" fill="#555c75" font-size="11">openai-codex / gpt-5.6-luna</text>
+    </g>
+    <g>
+      <rect x="414" y="144" width="322" height="52" rx="6" fill="#fff" stroke="#9cc7aa"/>
+      <text x="424" y="162" font-weight="700">recherche</text><text x="500" y="162" fill="#555c75">tableau de bord :9120</text>
+      <text x="424" y="180">default = Chercheur</text>
+    </g>
+    <g>
+      <rect x="414" y="204" width="322" height="52" rx="6" fill="#fff" stroke="#9cc7aa"/>
+      <text x="424" y="222" font-weight="700">marketing</text><text x="500" y="222" fill="#555c75">tableau de bord :9121</text>
+      <text x="424" y="240">default = CMO · profiles/apolline-m = Apolline M</text>
+    </g>
+
+    <rect x="414" y="270" width="322" height="128" rx="6" fill="#fff" stroke="#9cc7aa"/>
+    <text x="424" y="290" font-weight="700">Ce que le plugin lit dans chaque HERMES_HOME</text>
+    <text x="424" y="309"><tspan font-family="monospace" font-size="11">config.yaml</tspan>  modèle, fournisseur, validations, terminal</text>
+    <text x="424" y="327"><tspan font-family="monospace" font-size="11">profile.yaml</tspan>  description du profil</text>
+    <text x="424" y="345"><tspan font-family="monospace" font-size="11">state.db</tspan>  sessions (tokens, coût, durée) — lecture seule</text>
+    <text x="424" y="363"><tspan font-family="monospace" font-size="11">logs/errors.log</tspan>  erreurs 24 h / 7 jours</text>
+    <text x="424" y="381"><tspan font-family="monospace" font-size="11">hermes auth status</tspan>  connexion GPT valide ou non</text>
+  </svg>
+  <figcaption>Figure 1 — Paperclip décide (formulaire de base de l'agent) ; l'adaptateur Hermes Control fait tourner chaque agent sur le profil Hermes qui porte son nom ; le plugin recopie provider / modèle / thinking dans ce profil et affiche les instances.</figcaption>
+  </figure>
+
+  <div class="encadre"><strong>Règle d'or :</strong> une seule source de vérité, Paperclip. Hermes Control ne crée pas de page de réglages : il remplit les menus existants et recopie les choix dans Hermes. Les clés ne sont jamais lues ni affichées ; aucune commande ne passe par un shell.</div>
+<div class="encadre attention"><strong>Pourquoi un adaptateur :</strong> les menus Provider / Model du formulaire de base appartiennent à l'adaptateur Hermes de Paperclip, pas aux plugins. Paperclip permet officiellement de remplacer un adaptateur intégré par un adaptateur externe (pause / retour arrière à tout moment : <code>paperclipai adapter override hermes_local</code>).</div>
+</section>
+
+<!-- ================= PAGE 2 ================= -->
+<section class="page">
+  <h2>2. Ce que l'on voit dans Paperclip</h2>
+  <table>
+    <tr><th style="width:30%">Où</th><th>Quoi</th></tr>
+    <tr><td>Agent → Harness / Runtime → <strong>Provider</strong></td><td>Liste = providers configurés dans les profils Hermes (+ auto) ; défaut = celui de Hermes (openai-codex).</td></tr>
+    <tr><td>Agent → Harness / Runtime → <strong>Model</strong></td><td>Liste = modèles connus de Hermes pour ces providers (11 aujourd'hui, catalogue <code>provider_models_cache.json</code>) ; défaut = modèle du profil Hermes.</td></tr>
+    <tr><td>Agent → <strong>Test environment</strong></td><td>Ligne « Hermes Control : 3 instance(s) trouvée(s) : direction (default, assistant) · marketing (default, apolline-m) · recherche (default) ».</td></tr>
+    <tr><td>Barre latérale → <strong>Hermes</strong></td><td>Vue « instances » : profil, description, agent Paperclip relié par le nom, provider/modèle envoyés, working directory, connexion GPT, état de la dernière synchro.</td></tr>
+  </table>
+
+  <h3>La synchronisation Paperclip → Hermes</h3>
+  <p>Déclenchée à chaque modification d'un agent (<code>agent.updated</code> / <code>agent.created</code>), à l'ouverture de la vue, et toutes les 5 minutes. Le plugin compare <code>config.yaml</code> du profil aux valeurs Paperclip et n'écrit que les différences : <code>model.provider</code>, <code>model.default</code>, <code>reasoning_effort</code> (thinking, seulement s'il n'est pas « auto »). Valeurs validées (lettres, chiffres, <code>.-_:/</code>), exécution <code>hermes config set</code> sans shell.</p>
+
+  <h2 style="margin-top:14pt">3. Comment le nom choisit le Hermes</h2>
+  <ol class="num">
+    <li>Le nom de l'agent est mis en minuscules sans accents : « Apolline M » → <code>apolline-m</code>, « Chef » → <code>chef</code>.</li>
+    <li>On cherche un profil Hermes du même nom (<code>profiles/apolline-m</code>, <code>profiles/assistant</code>).</li>
+    <li>Sinon, un profil dont la description commence par ce mot : « Chef — PDG… » → profil <code>default</code> de l'instance direction ; « CMO — … » ; « Chercheur — … ».</li>
+    <li>Trouvé → le passage tourne avec <code>HERMES_HOME</code> de ce profil (plus besoin de lanceurs par agent) ; pas trouvé → le passage s'arrête avec la liste des profils connus.</li>
+    <li>Les instances sont cherchées dans <code>~/.hermes</code> et dans les dossiers listés dans <code>~/.config/hermes-control/roots</code> (pour CDjam : <code>~/Projects/ProjetC/hermes/profils</code>).</li>
+  </ol>
+  <div class="encadre attention"><strong>Thinking :</strong> Paperclip range le « Thinking effort » d'un agent Hermes dans ses arguments (<code>--reasoning-effort</code>) ; le plugin le recopie dans le profil Hermes quand il n'est pas « auto ».</div>
+
+  <h2 style="margin-top:14pt">4. Sécurité</h2>
+  <ul class="liste">
+    <li>Commandes <code>hermes</code> lancées sans shell (arguments séparés), noms de profils validés (<code>[a-z0-9._-]</code>).</li>
+    <li><code>state.db</code> ouverte en lecture seule avec <code>node:sqlite</code> (rien à compiler).</li>
+    <li>Aucune clé lue, aucun réseau sortant (capacité <code>http.outbound</code> non demandée).</li>
+    <li>La seule écriture (modèle d'un agent) passe par l'API Paperclip avec la session de l'utilisateur, jamais par le worker.</li>
+  </ul>
+
+  <h2 style="margin-top:14pt">5. Technique et état</h2>
+  <table>
+    <tr><th style="width:26%">Élément</th><th>Détail</th></tr>
+    <tr><td>Paquet</td><td><code>paperclip-plugin-hermes-control</code> 0.3.0 + <code>paperclip-adapter-hermes-control</code> 0.3.0 · MIT © Cyril M</td></tr>
+    <tr><td>Kit</td><td><code>@paperclipai/plugin-sdk</code> 2026.1001.0 · TypeScript strict · esbuild · Vitest · React fourni par Paperclip</td></tr>
+    <tr><td>Fichiers</td><td>Plugin : <code>src/manifest.ts</code> · <code>src/worker.ts</code> (synchro) · <code>src/match.ts</code> (nom → profil) · <code>src/sync.ts</code> · <code>src/discovery.ts</code> · <code>src/hermes.ts</code> · <code>src/ui/index.tsx</code>. Adaptateur : <code>adapter/src/index.ts</code>. 20 tests Vitest.</td></tr>
+    <tr><td>Installé sur CDjam</td><td><span class="ok">oui</span> — adaptateur <code>hermes_local</code> « overrides built-in » (Provider auto/openai-codex, 11 modèles), plugin 0.3.0 <code>ready</code>, les 5 agents reliés à leurs profils, synchro « à jour » (3 oct. 2026, 19 h)</td></tr>
+    <tr><td>À faire</td><td><span class="afaire">« Run now » avec Cyril</span> pour valider un passage complet · supprimer Chef (Codex) · publication npm + Paperclip Hub quand Cyril crée les comptes</td></tr>
+  </table>
+
+  <h3>Leçons apprises en construisant</h3>
+  <ul class="liste">
+    <li>Le manifeste du serveur exige <code>jobKey</code> (pas <code>key</code>) ; le valider avec le schéma zod de <code>@paperclipai/shared</code> avant d'installer.</li>
+    <li>Le worker doit finir par <code>runWorker(plugin, import.meta.url)</code>, sinon le processus sort aussitôt (code 0) et Paperclip marque le plugin en erreur.</li>
+    <li>Une dépendance CommonJS (yaml) dans un bundle ESM a besoin d'un <code>createRequire</code> en bannière esbuild.</li>
+    <li><code>paperclipai plugin init</code> plante (paquets manquants) : squelette écrit à la main.</li>
+    <li>Les jobs planifiés tournent <em>sans</em> périmètre entreprise : <code>config.get</code> / <code>agents.list</code> y sont refusés → le job relit les instances mémorisées dans l'état du plugin.</li>
+    <li>Paperclip lance le worker sans <code>HOME</code> : utiliser <code>os.homedir()</code>.</li>
+    <li>Pas d'emplacement de plugin sur les agents dans cette version ; les menus de l'agent appartiennent à l'adaptateur → d'où l'adaptateur Hermes Control qui remplace l'intégré.</li>
+    <li>Un adaptateur externe s'installe par chemin local (<code>adapter install --payload-json '{"packageName":"…","isLocalPath":true}'</code>) et doit exporter <code>createServerAdapter()</code>.</li>
+  </ul>
+</section>
+
+</body>
+</html>

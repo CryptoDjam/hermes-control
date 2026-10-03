@@ -1,0 +1,41 @@
+{
+  "name": "paperclip-adapter-hermes-control",
+  "version": "0.3.0",
+  "description": "Hermes Control adapter for Paperclip: the agent name picks its Hermes instance/profile; Provider and Model menus list what Hermes knows. Drop-in override of the built-in hermes_local adapter.",
+  "author": "Cyril M",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./ui-parser": "./ui-parser.cjs"
+  },
+  "paperclip": {
+    "adapterUiParser": "1.0.0"
+  },
+  "files": [
+    "dist/**/*.js",
+    "ui-parser.cjs",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "@paperclipai/hermes-paperclip-adapter": "2026.1001.0",
+    "yaml": "^2.6.0"
+  },
+  "devDependencies": {
+    "@paperclipai/adapter-utils": "2026.1001.0",
+    "@types/node": "^22.9.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  },
+  "allowScripts": {
+    "esbuild@0.24.2": true,
+    "esbuild@0.21.5": true
+  }
+}

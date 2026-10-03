@@ -1,0 +1,56 @@
+{
+  "name": "paperclip-plugin-hermes-control",
+  "version": "0.3.0",
+  "description": "See and control your Hermes Agent instances from Paperclip: profiles, models, auth status, sessions, errors and guardrails — per agent.",
+  "author": "Cyril M",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "paperclip",
+    "paperclip-plugin",
+    "hermes",
+    "hermes-agent",
+    "nous-research",
+    "agents"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js",
+    "ui": "./dist/ui"
+  },
+  "files": [
+    "dist/**/*.js",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run build"
+  },
+  "peerDependencies": {
+    "@paperclipai/plugin-sdk": ">=2026.1001.0"
+  },
+  "devDependencies": {
+    "@paperclipai/plugin-sdk": "^2026.1001.0",
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "esbuild": "^0.24.0",
+    "react": "^18.3.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  },
+  "dependencies": {
+    "yaml": "^2.6.0"
+  },
+  "allowScripts": {
+    "esbuild@0.24.2": true,
+    "esbuild@0.21.5": true
+  }
+}
