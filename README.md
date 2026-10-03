@@ -1,5 +1,7 @@
 # Hermes Control — Hermes Agent as the engine, Paperclip in charge
 
+Source: https://github.com/CryptoDjam/hermes-control · Author: Cyril M · MIT
+
 Run your [Paperclip](https://github.com/paperclipai/paperclip) agents on [Hermes Agent](https://github.com/NousResearch/hermes-agent) **without leaving Paperclip's own agent form**. Two small pieces, one project:
 
 ## 1. The adapter (`adapter/`) — Hermes's lists in Paperclip's menus
