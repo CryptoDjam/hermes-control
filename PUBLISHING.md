@@ -11,6 +11,9 @@ Attention : un jeton **sans** bypass ne peut publier que vers la « staging area
 Le site npmjs.com peut être bloqué depuis Starlink (adresse partagée) : utiliser le téléphone en 4G pour le site ; le registre (`npm publish`) passe depuis le PC.
 
 ## 2. Publier
+
+Ce qui a marché le 2026-10-03 : `npm login --auth-type=legacy` (mot de passe + code 2FA) → e-mail du compte vérifié → `scripts/publish.sh` publie en **staging** (`0.0.0-stage` visible) → **approbation sur npmjs.com** (téléphone, Staged Packages → Approve + 2FA) → la 0.3.0 devient `latest`. Le Hub indexe ensuite tout seul (mot-clé `paperclip-plugin`).
+
 ```
 scripts/publish.sh            # jeton bypass 2FA
 scripts/publish.sh 123456     # avec un code 2FA
