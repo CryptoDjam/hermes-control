@@ -1,0 +1,22 @@
+# Publie les deux paquets sur npm à chaque release GitHub (tag vX.Y.Z), via Trusted Publishing (OIDC, sans jeton).
+# À activer sur npmjs.com après la première publication manuelle (voir PUBLISHING.md §3).
+name: publish
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm ci && npm run check
+      - run: cd adapter && npm ci && npm run check
+      - run: cd adapter && npm publish --provenance --access public
+      - run: npm publish --provenance --access public
