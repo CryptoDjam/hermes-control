@@ -15,7 +15,8 @@
   "files": [
     "dist/**/*.js",
     "ui-parser.cjs",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "node esbuild.config.mjs",
@@ -46,5 +47,12 @@
   "homepage": "https://github.com/CryptoDjam/hermes-control#readme",
   "bugs": {
     "url": "https://github.com/CryptoDjam/hermes-control/issues"
-  }
+  },
+  "keywords": [
+    "paperclip",
+    "paperclip-adapter",
+    "hermes",
+    "hermes-agent",
+    "nous-research"
+  ]
 }
