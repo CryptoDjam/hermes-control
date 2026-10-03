@@ -121,7 +121,7 @@
     <tr><td>Agent → Harness / Runtime → <strong>Provider</strong></td><td>Liste = providers configurés dans les profils Hermes (+ auto) ; défaut = celui de Hermes (openai-codex).</td></tr>
     <tr><td>Agent → Harness / Runtime → <strong>Model</strong></td><td>Liste = modèles connus de Hermes pour ces providers (11 aujourd'hui, catalogue <code>provider_models_cache.json</code>) ; défaut = modèle du profil Hermes.</td></tr>
     <tr><td>Agent → <strong>Test environment</strong></td><td>Ligne « Hermes Control : 3 instance(s) trouvée(s) : direction (default, assistant) · marketing (default, apolline-m) · recherche (default) ».</td></tr>
-    <tr><td>Barre latérale → <strong>Hermes</strong></td><td>Vue « instances » : profil, description, agent Paperclip relié par le nom, provider/modèle envoyés, working directory, connexion GPT, état de la dernière synchro.</td></tr>
+    <tr><td>Barre latérale → <strong>Hermes</strong></td><td>Vue « instances » : un cadre par instance (chemin, tableau de bord, erreurs 24 h) et, par profil : description, modèle, connexion GPT, validations, terminal, agents Paperclip reliés par le nom (rouge si la synchro a échoué).</td></tr>
   </table>
 
   <h3>La synchronisation Paperclip → Hermes</h3>

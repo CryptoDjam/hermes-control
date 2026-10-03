@@ -52,5 +52,13 @@
   "allowScripts": {
     "esbuild@0.24.2": true,
     "esbuild@0.21.5": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CryptoDjam/hermes-control.git"
+  },
+  "homepage": "https://github.com/CryptoDjam/hermes-control#readme",
+  "bugs": {
+    "url": "https://github.com/CryptoDjam/hermes-control/issues"
   }
 }
