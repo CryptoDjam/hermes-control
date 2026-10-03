@@ -6,6 +6,8 @@ Compte : `cyberservices-ai` (e-mail ineeddbox@gmail.com). npm exige, pour publie
 - Jeton avec bypass (recommandé) : npmjs.com → avatar → Access Tokens → Generate New Token → Granular → Read and write, All packages, cocher *Bypass 2FA* → copier → sur le PC : `npm-jeton` (colle, Entrée) → `npm whoami`.
 - Sans bypass : garder une application d'authentification sous la main et publier avec `scripts/publish.sh <code 2FA>`.
 
+Attention : un jeton **sans** bypass ne peut publier que vers la « staging area » de npm, et une **première** publication (paquet inexistant) l'exige « direct-capable » (bypass 2FA). Erreur vue le 2026-10-03 : `E_STAGE_REQUIRED`. La case *Bypass 2FA* n'apparaît qu'une fois la 2FA du compte activée (application d'authentification).
+
 Le site npmjs.com peut être bloqué depuis Starlink (adresse partagée) : utiliser le téléphone en 4G pour le site ; le registre (`npm publish`) passe depuis le PC.
 
 ## 2. Publier
