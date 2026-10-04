@@ -11,5 +11,5 @@
     "types": ["node"],
     "rootDir": ".."
   },
-  "include": ["src/**/*.ts", "../src/hermes.ts", "../src/match.ts", "../src/discovery.ts"]
+  "include": ["src/**/*.ts", "../src/hermes.ts", "../src/match.ts", "../src/discovery.ts", "../src/agents-map.ts"]
 }

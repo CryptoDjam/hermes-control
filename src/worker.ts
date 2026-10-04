@@ -1,4 +1,4 @@
-// Worker du plugin Hermes Control (v0.3). Paperclip est le maître :
+// Worker du plugin Hermes Control (v0.4). Paperclip est le maître :
 //  - pour chaque agent Hermes, le NOM choisit le profil Hermes ; provider / modèle / thinking choisis dans
 //    le menu de l'agent sont écrits dans le config.yaml de ce profil (`hermes config set`, sans shell) ;
 //  - une seule donnée exposée à l'interface : « instances » (lecture seule).
@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 import { instanceHomes } from "./discovery.js";
 import { type HermesInstance, detectDashboards, instanceNameFromHome, readInstance, resolveHomeFromLauncher } from "./hermes.js";
 import { matchAgent } from "./match.js";
+import { rememberAgent } from "./agents-map.js";
 import { type Desired, desiredFromAdapterConfig, syncProfile } from "./sync.js";
 
 interface AgentLike {
@@ -98,6 +99,8 @@ const plugin = definePlugin({
         if (!m) {
           rec.error = "aucun profil Hermes de ce nom";
         } else {
+          // carte agentId → profil, lue par l'adaptateur pour poser les liens de skills (listSkills / syncSkills n'ont que l'id)
+          await rememberAgent(a.agentId, { name: a.agentName, instance: m.instance.name, profile: m.profile.name, home: m.profile.home }).catch(() => {});
           const r = await syncProfile(m.profile.home, a.want, BINARY);
           rec.changed = r.changed;
           rec.error = r.error;

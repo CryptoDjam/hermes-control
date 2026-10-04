@@ -10,7 +10,8 @@ A drop-in **override of the built-in `hermes_local` adapter** (an official Paper
 - **Model** menu lists the models Hermes knows for them (`provider_models_cache.json`);
 - default model/provider (`detectModel`) come from Hermes;
 - at run time, **the agent's name picks its Hermes instance/profile**: a profile with the same name (`profiles/apolline-m` for « Apolline M ») or whose description starts with the name (« Chef — … » → the `default` profile of that instance). `HERMES_HOME` is set accordingly; no launcher scripts needed.
-- **Test environment** shows the instances found.
+- **Test environment** shows the instances found;
+- **skills assigned in Paperclip follow the agent**: the built-in adapter links Paperclip-managed skills into `~/.hermes/skills` (it looks at `$HOME`, not `HERMES_HOME`), but Hermes only loads `$HERMES_HOME/skills`. Hermes Control links each assigned skill into `<profile>/skills/<name>` when you sync skills in Paperclip and at the start of every run, and removes the link when you unassign it (only links pointing to a Paperclip source are removed; your own skills in the profile are left alone and listed read-only). Because Paperclip's skill hooks only carry the agent id, the agent → profile map lives in `~/.config/hermes-control/agents.json` (written at run time and by the plugin's sync).
 
 Install (local path or npm):
 ```

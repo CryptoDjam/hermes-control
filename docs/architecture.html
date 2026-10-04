@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<title>Hermes Control — architecture (v0.3)</title>
+<title>Hermes Control — architecture (v0.4)</title>
 <style>
   @page { size: A4; margin: 16mm 14mm; }
   * { box-sizing: border-box; }
@@ -33,10 +33,10 @@
 <!-- ================= PAGE 1 ================= -->
 <section class="page">
   <h1>Hermes Control — Hermes moteur, Paperclip aux commandes</h1>
-  <div class="sous">Plugin Paperclip signé Cyril M · version 0.3.0, état au 3 octobre 2026 (soir) · code : <code>~/.claude/projects/hermes-control/</code></div>
+  <div class="sous">Plugin Paperclip signé Cyril M · version 0.4.0, état au 4 octobre 2026 (midi) · code : <code>~/.claude/projects/hermes-control/</code></div>
 
   <h2>1. Le principe</h2>
-  <p><strong>Paperclip est le maître.</strong> Pour chaque agent, Paperclip envoie cinq données : son <strong>nom</strong>, son <strong>working directory</strong>, son <strong>provider</strong>, son <strong>modèle</strong>, son <strong>thinking</strong>. Avec le nom, Hermes Control trouve le profil Hermes correspondant ; provider / modèle / thinking y sont écrits et Hermes tourne dessus. Dans l'autre sens, les menus Provider et Model du formulaire de base de l'agent listent ce que Hermes connaît. Rien d'autre n'entre ni ne sort. Deux pièces dans un même projet : un <em>adaptateur</em> (remplace l'adaptateur Hermes intégré) et un <em>plugin</em> (synchro + une vue « instances »).</p>
+  <p><strong>Paperclip est le maître.</strong> Pour chaque agent, Paperclip envoie cinq données : son <strong>nom</strong>, son <strong>working directory</strong>, son <strong>provider</strong>, son <strong>modèle</strong>, son <strong>thinking</strong>. Avec le nom, Hermes Control trouve le profil Hermes correspondant ; provider / modèle / thinking y sont écrits et Hermes tourne dessus. Dans l'autre sens, les menus Provider et Model du formulaire de base de l'agent listent ce que Hermes connaît. Depuis la 0.4, les <strong>skills</strong> cochés pour l'agent dans Paperclip suivent aussi : ils sont liés dans le dossier <code>skills</code> du profil Hermes de l'agent. Rien d'autre n'entre ni ne sort. Deux pièces dans un même projet : un <em>adaptateur</em> (remplace l'adaptateur Hermes intégré) et un <em>plugin</em> (synchro + une vue « instances »).</p>
 
   <figure>
   <svg viewBox="0 0 760 420" xmlns="http://www.w3.org/2000/svg" font-family="Inter, Cantarell, sans-serif" font-size="12">
@@ -53,8 +53,8 @@
     <text x="34" y="106">Working directory · Provider ▾ · Model ▾ · Thinking ▾</text>
     <text x="34" y="124">→ menus remplis par l'adaptateur Hermes Control</text>
     <text x="34" y="142">   (providers et modèles connus de Hermes)</text>
-    <text x="34" y="160">• Barre latérale « Hermes » → vue « instances » (lecture seule)</text>
-    <text x="34" y="177" fill="#555c75" font-size="11">aucune autre page, aucun réglage</text>
+    <text x="34" y="160">• Onglet Skills de l'agent → liés dans &lt;profil&gt;/skills (0.4)</text>
+    <text x="34" y="177" fill="#555c75" font-size="11">• Barre latérale « Hermes » → vue « instances » · aucune autre page</text>
 
     <rect x="24" y="200" width="300" height="118" rx="6" fill="#fff" stroke="#9fb0e6"/>
     <text x="34" y="220" font-weight="700">Adaptateur Hermes Control (remplace hermes_local)</text>
@@ -124,6 +124,9 @@
     <tr><td>Barre latérale → <strong>Hermes</strong></td><td>Vue « instances » : un cadre par instance (chemin, tableau de bord, erreurs 24 h) et, par profil : description, modèle, connexion GPT, validations, terminal, agents Paperclip reliés par le nom (rouge si la synchro a échoué).</td></tr>
   </table>
 
+  <h3>Les skills suivent l'agent (0.4)</h3>
+  <p>L'adaptateur Hermes officiel pose les liens des skills gérés par Paperclip dans <code>~/.hermes/skills</code> (il regarde <code>$HOME</code>, jamais <code>HERMES_HOME</code>), alors que Hermes ne lit que <code>$HERMES_HOME/skills</code>. Avec un profil par agent, un skill coché dans Paperclip restait donc invisible (vu le 4 octobre : le Chef ne trouvait pas <code>first-task</code>). Hermes Control lie maintenant chaque skill désiré dans <code>&lt;profil&gt;/skills/&lt;nom&gt;</code> — à la synchro (onglet Skills) et au début de chaque passage — et retire le lien quand le skill est décoché. Seuls les liens qui pointent vers une source Paperclip sont retirés : les skills maison du profil (<code>comfyui</code>, <code>rapport</code>…) ne sont jamais touchés et apparaissent en lecture seule dans l'onglet. Comme ces appels de Paperclip ne portent que l'identifiant de l'agent, la carte agent → profil est tenue dans <code>~/.config/hermes-control/agents.json</code> (écrite au passage et par la synchro du plugin).</p>
+
   <h3>La synchronisation Paperclip → Hermes</h3>
   <p>Déclenchée à chaque modification d'un agent (<code>agent.updated</code> / <code>agent.created</code>), à l'ouverture de la vue, et toutes les 5 minutes. Le plugin compare <code>config.yaml</code> du profil aux valeurs Paperclip et n'écrit que les différences : <code>model.provider</code>, <code>model.default</code>, <code>reasoning_effort</code> (thinking, seulement s'il n'est pas « auto »). Valeurs validées (lettres, chiffres, <code>.-_:/</code>), exécution <code>hermes config set</code> sans shell.</p>
 
@@ -148,11 +151,11 @@
   <h2 style="margin-top:14pt">5. Technique et état</h2>
   <table>
     <tr><th style="width:26%">Élément</th><th>Détail</th></tr>
-    <tr><td>Paquet</td><td><code>paperclip-plugin-hermes-control</code> 0.3.0 + <code>paperclip-adapter-hermes-control</code> 0.3.0 · MIT © Cyril M</td></tr>
+    <tr><td>Paquet</td><td><code>paperclip-plugin-hermes-control</code> 0.4.0 + <code>paperclip-adapter-hermes-control</code> 0.4.0 · MIT © Cyril M</td></tr>
     <tr><td>Kit</td><td><code>@paperclipai/plugin-sdk</code> 2026.1001.0 · TypeScript strict · esbuild · Vitest · React fourni par Paperclip</td></tr>
-    <tr><td>Fichiers</td><td>Plugin : <code>src/manifest.ts</code> · <code>src/worker.ts</code> (synchro) · <code>src/match.ts</code> (nom → profil) · <code>src/sync.ts</code> · <code>src/discovery.ts</code> · <code>src/hermes.ts</code> · <code>src/ui/index.tsx</code>. Adaptateur : <code>adapter/src/index.ts</code>. 20 tests Vitest.</td></tr>
-    <tr><td>Installé sur CDjam</td><td><span class="ok">oui</span> — adaptateur <code>hermes_local</code> « overrides built-in » (Provider auto/openai-codex, 11 modèles), plugin 0.3.0 <code>ready</code>, les 5 agents reliés à leurs profils, synchro « à jour » (3 oct. 2026, 19 h)</td></tr>
-    <tr><td>À faire</td><td><span class="afaire">« Run now » avec Cyril</span> pour valider un passage complet · supprimer Chef (Codex) · publication npm + Paperclip Hub quand Cyril crée les comptes</td></tr>
+    <tr><td>Fichiers</td><td>Plugin : <code>src/manifest.ts</code> · <code>src/worker.ts</code> (synchro) · <code>src/match.ts</code> (nom → profil) · <code>src/sync.ts</code> · <code>src/discovery.ts</code> · <code>src/hermes.ts</code> · <code>src/ui/index.tsx</code>. <code>src/agents-map.ts</code> (carte agent → profil). Adaptateur : <code>adapter/src/index.ts</code> · <code>adapter/src/skills.ts</code> (skills → profil). 48 tests Vitest.</td></tr>
+    <tr><td>Installé sur CDjam</td><td><span class="ok">oui</span> — adaptateur <code>hermes_local</code> 0.4.0 « overrides built-in » (Provider auto/openai-codex, 11 modèles), plugin 0.4.0 <code>ready</code>, les 5 agents reliés à leurs profils, synchro « à jour » ; test du 4 oct. : <code>first-task</code> coché pour le Chef → lien posé dans <code>direction/skills</code>, vu par <code>hermes skills list</code> ; coché/décoché sur l'Assistant → lien posé/retiré, autres skills intacts</td></tr>
+    <tr><td>À faire</td><td><span class="afaire">Publication npm 0.4.0</span> (approbation « staging » par Cyril) · Trusted Publishing · Paperclip Hub</td></tr>
   </table>
 
   <h3>Leçons apprises en construisant</h3>
@@ -164,6 +167,7 @@
     <li>Les jobs planifiés tournent <em>sans</em> périmètre entreprise : <code>config.get</code> / <code>agents.list</code> y sont refusés → le job relit les instances mémorisées dans l'état du plugin.</li>
     <li>Paperclip lance le worker sans <code>HOME</code> : utiliser <code>os.homedir()</code>.</li>
     <li>Pas d'emplacement de plugin sur les agents dans cette version ; les menus de l'agent appartiennent à l'adaptateur → d'où l'adaptateur Hermes Control qui remplace l'intégré.</li>
+    <li>Les hooks <code>listSkills</code> / <code>syncSkills</code> ne reçoivent que l'identifiant de l'agent (pas son nom) → carte partagée <code>agents.json</code>. L'adaptateur Hermes officiel ignore <code>HERMES_HOME</code> pour les skills (il lit <code>$HOME/.hermes/skills</code>).</li>
     <li>Un adaptateur externe s'installe par chemin local (<code>adapter install --payload-json '{"packageName":"…","isLocalPath":true}'</code>) et doit exporter <code>createServerAdapter()</code>.</li>
   </ul>
 </section>

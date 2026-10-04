@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { rememberAgent } from "../../src/agents-map.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServerAdapter } from "./index.js";
@@ -60,5 +61,27 @@ describe("adaptateur Hermes Control", () => {
     const ctx = { runId: "r", agent: { id: "x", companyId: "c", name: "Inconnu", adapterType: "hermes_local", adapterConfig: {} }, runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null }, config: {}, onLog: async (_s: string, t: string) => { logs.push(t); } };
     await expect(a.execute(ctx as never)).rejects.toThrow(/Inconnu/);
     expect(logs.join("")).toContain("marketing/apolline-m");
+  });
+
+  it("listSkills / syncSkills : profil inconnu → avertissement ; profil connu → lien dans <profil>/skills", async () => {
+    const a = createServerAdapter();
+    const src = join(root, "paperclip-src", "first-task");
+    await mkdir(src, { recursive: true });
+    await writeFile(join(src, "SKILL.md"), "---\nname: first-task\ndescription: d\n---\n");
+    const config = {
+      paperclipRuntimeSkills: [{ key: "paperclipai/paperclip/first-task", runtimeName: "first-task", source: src }],
+      paperclipSkillSync: { desiredSkills: [{ key: "paperclipai/paperclip/first-task", versionId: null }] },
+    };
+    const ctx = { agentId: "ag-1", companyId: "c", adapterType: "hermes_local", config };
+    const unknown = await a.listSkills!(ctx);
+    expect(unknown.warnings.join(" ")).toMatch(/profil Hermes inconnu/);
+
+    const home = join(root, "marketing", "profiles", "apolline-m");
+    await rememberAgent("ag-1", { name: "Apolline M", instance: "marketing", profile: "apolline-m", home });
+    const synced = await a.syncSkills!(ctx, ["paperclipai/paperclip/first-task"]);
+    const ft = synced.entries.find((e) => e.runtimeName === "first-task")!;
+    expect(ft.state).toBe("configured");
+    expect(ft.targetPath).toBe(join(home, "skills", "first-task"));
+    expect((await lstat(join(home, "skills", "first-task"))).isSymbolicLink()).toBe(true);
   });
 });
