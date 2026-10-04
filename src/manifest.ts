@@ -4,12 +4,12 @@
 const manifest = {
   id: "hermes-control",
   apiVersion: 1,
-  version: "0.4.0",
+  version: "0.5.0",
   displayName: "Hermes Control",
   author: "Cyril M",
   description:
     "Hermes Agent as the engine, Paperclip in charge: the agent name picks its Hermes profile, and the provider / model / thinking " +
-    "chosen in the agent menu are written to that Hermes profile. Pair it with the Hermes Control adapter to list Hermes providers and models in Paperclip.",
+    "chosen in the agent menu are written to that Hermes profile; a Hermes agent created in Paperclip gets its Hermes profile, folders and links prepared automatically. Pair it with the Hermes Control adapter to list Hermes providers and models in Paperclip.",
   categories: ["ui", "automation"],
   capabilities: [
     "agents.read",
@@ -20,6 +20,7 @@ const manifest = {
     "jobs.schedule",
     "ui.page.register",
     "ui.sidebar.register",
+    "ui.action.register",
   ],
   entrypoints: {
     worker: "./dist/worker.js",

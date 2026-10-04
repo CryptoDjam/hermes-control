@@ -28,6 +28,9 @@ The only UI: a sidebar link **Hermes** → the **instances** view (instance · p
 paperclipai plugin install paperclip-plugin-hermes-control
 ```
 
+## 3. With `hermes-paperclip-pack`: agents prepare themselves (0.5)
+When a shared workspace is declared in `~/.config/hermes-control/workspace` (one line, written by [`hermes-paperclip-pack init`](https://github.com/CryptoDjam/hermes-paperclip-pack)), a Hermes agent created in Paperclip with no matching profile is **prepared automatically**: profile cloned from the company instance, folders `<ws>/agents/<slug>/…`, memory and journal links, common skills, SOUL from the templates. The Hermes page shows the common folders, a « Préparer l'agent » button as a fallback, and a Telegram token field per profile (written to the profile's `.env`, mode 600, never shown again). Without that file nothing is created automatically.
+
 ## Development
 ```
 npm install && npm run check            # plugin: typecheck + tests + build

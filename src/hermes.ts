@@ -320,8 +320,9 @@ export function profileHome(instanceHome: string, profile: string): string {
 
 // ---- commandes Hermes exposées à Paperclip (toutes sans shell, arguments séparés) ----
 
-export async function profileCreate(instanceHome: string, name: string, description: string | null, binary: string): Promise<string> {
+export async function profileCreate(instanceHome: string, name: string, description: string | null, binary: string, opts: { clone?: boolean } = {}): Promise<string> {
   const args = ["profile", "create", assertSafeName(name), "--no-alias"];
+  if (opts.clone) args.push("--clone");
   if (description) args.push("--description", description.slice(0, 500));
   return hermes(instanceHome, args, binary, 120_000);
 }

@@ -14,6 +14,8 @@ import { discoverLight, rootsFile } from "../../src/discovery.js";
 import { type HermesInstance, readModelCatalogs } from "../../src/hermes.js";
 import { type Match, matchAgent } from "../../src/match.js";
 import { recallAgent, rememberAgent } from "../../src/agents-map.js";
+import { slug } from "../../src/match.js";
+import { exists, readWorkspace } from "../../src/workspace.js";
 import { reconcileIntoProfile, snapshotForProfile } from "./skills.js";
 
 type AnyRecord = Record<string, unknown>;
@@ -98,6 +100,15 @@ export function createServerAdapter(): Base {
     }
     const env = { ...((config["env"] as AnyRecord | undefined) ?? {}), HERMES_HOME: m.profile.home };
     config["env"] = env;
+    // pas de working directory choisi dans Paperclip → le dossier de l'agent dans le dossier de travail commun, s'il existe
+    if (typeof config["cwd"] !== "string" || !(config["cwd"] as string).trim()) {
+      const ws = await readWorkspace();
+      const dir = ws ? join(ws.agents, slug(c.agent.name)) : null;
+      if (dir && (await exists(dir))) {
+        config["cwd"] = dir;
+        await c.onLog?.("stdout", `[hermes-control] working directory = ${dir}\n`);
+      }
+    }
     if (typeof config["hermesCommand"] !== "string" || !(config["hermesCommand"] as string).trim()) config["hermesCommand"] = await hermesBinary();
     await c.onLog?.("stdout", `[hermes-control] ${c.agent.name} → Hermes ${m.instance.name}/${m.profile.name} (${m.by === "profile-name" ? "profil du même nom" : "description"}) · HERMES_HOME=${m.profile.home}\n`);
     await remember(c.agent.id, m, c.agent.name);

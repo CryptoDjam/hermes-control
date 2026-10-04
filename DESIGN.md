@@ -1,4 +1,4 @@
-# Hermes Control — conception (v0.4, 4 octobre 2026)
+# Hermes Control — conception (v0.5, 4 octobre 2026)
 
 ## Principe (fixé par Cyril)
 **Paperclip est le maître.** Pour chaque agent, Paperclip fournit cinq données : nom, working directory, provider, modèle, thinking. Rien d'autre ne sort de Paperclip ; rien d'autre n'y entre, sauf les **listes** (providers et modèles connus de Hermes) pour remplir les menus existants de l'agent. Pas de page de choix, pas de page de réglages.
@@ -16,6 +16,9 @@ Constat du 2026-10-04 (CDjam, Chef) : l'adaptateur Hermes officiel pose les lien
 - `listSkills` montre le vrai chemin du lien dans le profil (`targetPath`) et remplace les skills « ~/.hermes/skills » (non lus par le profil) par ceux du profil, en lecture seule ;
 - les hooks `listSkills` / `syncSkills` ne reçoivent que `agentId` → carte partagée `~/.config/hermes-control/agents.json` (`src/agents-map.ts`), écrite par `execute` et par le worker du plugin à chaque synchro ; profil inconnu → avertissement, les liens seront posés au prochain passage.
 Rien ne passe par un shell ; aucune commande `hermes` : uniquement des liens symboliques dans le dossier `skills` du profil.
+
+## Un agent créé dans Paperclip = un profil Hermes prêt (`src/prepare.ts`, `src/workspace.ts`, v0.5)
+Dossier de travail commun déclaré dans `~/.config/hermes-control/workspace` (posé par `hermes-paperclip-pack init`) : `<ws>/hermes/profils/<entreprise>` (instance), `<ws>/hermes/skills` (skills communs), `<ws>/modeles` (gabarits `{{nom}} {{slug}} {{titre}} {{entreprise}} {{ws}} {{skills}}`), `<ws>/agents/<agent>`. `syncAll` : agent `hermes_local` sans profil → `prepareAgent()` (instance = celle qui porte le slug de l'entreprise, sinon la première du dossier) : `profileCreate(…, {clone:true})`, dossiers, `memories` lié **avant** d'écrire les gabarits (les fichiers créés par Hermes sont déplacés, jamais perdus), `journal` → `logs/`, skills communs liés (lien mort du clone remplacé ; lien vivant vers la même cible accepté ; lien vivant ailleurs laissé + avertissement), SOUL rendu. Seulement avec périmètre entreprise (événements, vue) ; le job 5 min ne crée rien. Actions (`ui.action.register`) : `prepare-agent` (utilisateur board) et `set-telegram` (chemin ∈ profils connus, jeton validé par regex, `.env` 600, `hermes gateway install --start-now`, rien dans l'état ni les logs). Adaptateur : `cwd` par défaut = `<ws>/agents/<slug>` s'il existe.
 
 ## Nom → profil (`src/match.ts`)
 `slug(nom)` (minuscules, sans accents, `-`) ; profil du même nom d'abord (`profiles/apolline-m`), sinon profil dont la description commence par ce mot (« Chef — PDG » → `default` de direction). Pas de correspondance → passage refusé avec la liste des profils connus ; ligne rouge dans la vue.
