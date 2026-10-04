@@ -22,6 +22,10 @@ Le script lance les tests + builds, saute un paquet déjà publié à cette vers
 
 Nouvelle version : changer `version` dans `package.json` **et** `adapter/package.json` (même numéro), ajouter l'entrée dans `CHANGELOG.md`, commit + tag `git tag v0.3.1 && git push --tags`, puis publier.
 
+### Vu le 2026-10-04 (0.4.0)
+- `scripts/publish.sh` : l'adaptateur 0.4.0 est parti en **staging** (à approuver sur npmjs.com, téléphone) ; `npm view` ne le montre qu'après approbation.
+- Le plugin a répondu `E403 … cannot be republished until 24 hours have passed` : `npm view paperclip-plugin-hermes-control` dit **« Unpublished on 2026-10-03T23:07:22Z »** (01:07 heure de Paris le 4). Un paquet dépublié ne peut pas être republié sous le même nom pendant 24 h → relancer `scripts/publish.sh` après le 2026-10-05 01:10 (le script saute l'adaptateur déjà publié). Ne jamais dépublier : préférer `npm deprecate`.
+
 ## 3. Après la première publication : publication sans jeton (GitHub Actions)
 Sur npmjs.com, pour chaque paquet : Package → Settings → **Trusted Publishing** → GitHub Actions → owner `CryptoDjam`, repo `hermes-control`, workflow `publish.yml`. Ensuite, créer une *release* GitHub (tag `vX.Y.Z`) publie les deux paquets automatiquement, avec provenance, sans jeton ni 2FA (`.github/workflows/publish.yml`).
 
@@ -30,4 +34,4 @@ Sur npmjs.com, pour chaque paquet : Package → Settings → **Trusted Publishin
 - awesome-paperclip : https://github.com/gsxdsm/awesome-paperclip → PR ajoutant la ligne de `docs/hub-submission.md`.
 
 ## 5. Vérifier
-`npm view paperclip-plugin-hermes-control version` et `npm view paperclip-adapter-hermes-control version` → 0.3.0 ; `npx paperclipai plugin install paperclip-plugin-hermes-control` fonctionne sur une instance vierge.
+`npm view paperclip-plugin-hermes-control version` et `npm view paperclip-adapter-hermes-control version` → 0.4.0 ; `npx paperclipai plugin install paperclip-plugin-hermes-control` fonctionne sur une instance vierge.
