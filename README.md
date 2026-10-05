@@ -31,6 +31,10 @@ paperclipai plugin install paperclip-plugin-hermes-control
 ## 3. With `hermes-paperclip-pack`: agents prepare themselves (0.5)
 When a shared workspace is declared in `~/.config/hermes-control/workspace` (one line, written by [`hermes-paperclip-pack init`](https://github.com/CryptoDjam/hermes-paperclip-pack)), a Hermes agent created in Paperclip with no matching profile is **prepared automatically**: profile cloned from the company instance, folders `<ws>/agents/<slug>/…`, memory and journal links, common skills, SOUL from the templates. The Hermes page shows the common folders, a « Préparer l'agent » button as a fallback, and a Telegram token field per profile (written to the profile's `.env`, mode 600, never shown again). Without that file nothing is created automatically.
 
+## Security note
+
+Hermes Control wraps the official `hermes_local` adapter, and inherits its behaviour: every Paperclip run launches `hermes chat --yolo`, i.e. **no interactive approval**, whatever `approvals.mode` says in the profile. With `terminal.backend: local`, the agent runs with the Unix user's rights, except for what the profile's `deny` list blocks — and a pattern-based deny list can be bypassed. The real protection of a Paperclip run is the `deny` list plus the execution backend (a Docker backend is the recommended target), not approvals. Also note that `hermes profile create --clone` copies the instance's `.env` (API keys, Telegram token) into the new profile; 0.6 will prepare profiles with an empty `.env`.
+
 ## Development
 ```
 npm install && npm run check            # plugin: typecheck + tests + build
