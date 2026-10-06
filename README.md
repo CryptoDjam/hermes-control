@@ -1,6 +1,6 @@
 # Hermes Control — Hermes Agent as the engine, Paperclip in charge
 
-> **Warning — `master` contains 0.6 in development: not installable and not yet acceptance-tested.** Install **0.5.0** from npm (`paperclip-plugin-hermes-control@0.5.0`, `paperclip-adapter-hermes-control@0.5.0`). 0.5.0 does not provide the 0.6 explicit-assignment guarantees.
+> **Warning — `master` contains 0.6.1 in development: not published and not yet acceptance-tested.** Install **0.5.0** from npm (`paperclip-plugin-hermes-control@0.5.0`, `paperclip-adapter-hermes-control@0.5.0`). 0.5.0 does not provide the 0.6 explicit-assignment guarantees.
 
 Source: https://github.com/CyberServices-ai/hermes-control · Author: Cyril M · MIT
 
@@ -11,25 +11,27 @@ A drop-in **override of the built-in `hermes_local` adapter** (an official Paper
 - **Provider** menu (Agent → Harness / Runtime) lists the providers actually configured in your Hermes instances;
 - **Model** menu lists the models Hermes knows for them (`provider_models_cache.json`);
 - default model/provider (`detectModel`) come from Hermes;
-- at run time, **the agent runs only in the Hermes profile explicitly assigned to it** (0.6): the adapter reads the assignments table `~/.config/hermes-control/assignments.json` (company → authorized instances; agent → instance / profile; written only by the plugin's assignment actions, **never by name**) and sets `HERMES_HOME` to that profile. It **refuses to run** when the agent has no assignment (« non affecté »), when the assignment is invalid (instance no longer authorized for the agent's company, profile claimed by two agents, instance outside the known roots), when it was recorded for another company than `ctx.agent.companyId`, when the profile's `config.yaml` is absent or unreadable, when the profile's preparation was interrupted (`preparing-*` state, or created by Hermes Control without `env-cleaned`), or when the watchdog socket path would exceed 100 bytes (measured on the launcher's literal `HERMES_HOME`, before `realpath`, since Hermes binds its sockets on the path it is given: a short symlink such as `~/.h/d` → a deep root keeps the sockets short). Launcher scripts (`hermesCommand`) remain the rule in production: a launcher does `export HERMES_HOME=…` itself, so the adapter reads it statically and refuses **any uncertainty** (unresolved variable, several `HERMES_HOME`, unreadable script) and any divergence from the assignment; an **approved Hermes binary** (`HERMES_CONTROL_HERMES_BIN`, the table's `approvedBinaries`, or a bare command name) is accepted as is. `agents.json` is only a projection of the table (same fingerprint) used as a fallback.
+- at run time, **the agent runs only in the Hermes profile explicitly assigned to it**, and **the adapter builds the Hermes command itself** (0.6.1, see *Configuration contract* and *Controlled execution* below): the administered Hermes binary (absolute path in the table, verified before every run), `HERMES_HOME` = the administered *execution root* + `profiles/<profile>` (or the root itself for the `default` profile), an explicit environment. The agent's own `hermesCommand` / `command`, a bare name or the `PATH` are **never** used to launch Hermes; no launcher script is read or run. It **refuses to run** when the agent has no assignment (« non affecté »), when the assignment is invalid (instance no longer authorized for the agent's company, profile claimed by two agents, instance outside the known roots, execution root pointing to another instance), when it was recorded for another company than `ctx.agent.companyId`, when the profile's `config.yaml` is absent or unreadable, when the profile's preparation was interrupted, when the administered binary is missing or fails verification, when `extraArgs` carries `-p`/`--profile`, or when the watchdog socket path measured **on the `HERMES_HOME` string actually passed** would exceed 100 bytes. A refusal is **not retried** by Paperclip (see *Refusals*).
 - **Test environment** shows the instances found;
-- **skills assigned in Paperclip follow the agent**: the built-in adapter links Paperclip-managed skills into `~/.hermes/skills` (it looks at `$HOME`, not `HERMES_HOME`), but Hermes only loads `$HERMES_HOME/skills`. Hermes Control links each assigned skill into `<profile>/skills/<name>` when you sync skills in Paperclip and at the start of every run, and removes the link when you unassign it (only links pointing to a Paperclip source are removed; your own skills in the profile are left alone and listed read-only). Because Paperclip's skill hooks only carry the agent id, the agent → profile map lives in `~/.config/hermes-control/agents.json` (written at run time and by the plugin's sync).
+- **skills assigned in Paperclip follow the agent**: the built-in adapter links Paperclip-managed skills into `~/.hermes/skills` (it looks at `$HOME`, not `HERMES_HOME`), but Hermes only loads `$HERMES_HOME/skills`. Hermes Control links each assigned skill into `<profile>/skills/<name>` when you sync skills in Paperclip and at the start of every run, and removes the link when you unassign it (only links pointing to a Paperclip source are removed; your own skills in the profile are left alone and listed read-only). Paperclip's skill hooks only carry the agent id: the adapter looks the agent up in the assignments table (the projection `agents.json` is only a fallback with the same fingerprint, rewritten whenever the table is written — never at run time).
 
 Install (local path or npm):
 ```
 paperclipai adapter install --payload-json '{"packageName":"paperclip-adapter-hermes-control"}'
 ```
-Where instances are: `~/.hermes`, plus the folders listed in `~/.config/hermes-control/roots` (one per line: an instance, or a folder of instances), plus `$HERMES_CONTROL_ROOTS`. Hermes binary: `$HERMES_CONTROL_HERMES_BIN` if set, else `~/.local/bin/hermes`, else `hermes` in Paperclip's PATH. Roll back any time: `paperclipai adapter override hermes_local` (pause) or `adapter delete hermes_local`.
+Where instances are: the account's `~/.hermes`, plus the folders listed in `<reference>/roots` (one per line: an instance, or a folder of instances). Hermes binary: **only** the one administered in the table (`hermes.binary`, or per instance). No environment variable is read (0.6.1). Pause the adapter any time: `paperclipai adapter override hermes_local` (pause) or `adapter delete hermes_local`; for a full rollback to 0.5.0 see *Rollback*.
 
 ## 2. The plugin — explicit assignments, Paperclip → Hermes sync, one view
 Paperclip is the master, and **the assignment is explicit**. For every Hermes agent the plugin reads **name, working directory, provider, model, thinking** from Paperclip, looks up its assignment in the table (never by name), and writes **provider / model / thinking** into the assigned profile's `config.yaml` (`hermes config set`, no shell, only when different; never when the `config.yaml` is unreadable). An agent without assignment gets « non affecté », nothing is written to Hermes, and the view shows a **suggestion** by name (same profile name, or a description starting with the name, restricted to the company's authorized instances) that is **never applied**. Renaming an agent changes nothing. It runs on `agent.updated` / `agent.created`, when the view is opened, and every 5 minutes.
 
-The only UI: a sidebar link **Hermes** → the **instances** view. Opening it **creates no profile, folder or link, runs no launcher and never writes the table**. Its actions (board users only):
+The only UI: a sidebar link **Hermes** → the **instances** view, **filtered by company** (the company's authorized instances and the unclaimed ones, its own agents, their states, health and errors — company A sees nothing of company B). Opening it **creates no profile, folder or link, reads or runs no launcher and never writes the table**; it shows the reference (path + fingerprints), the administered binary, a hybrid or out-of-date `agents.json`, and every agent whose `hermesCommand` is now ignored. Every Hermes call of the plugin (sync `hermes config set`, `profile create`, `auth status`, `gateway install`) goes through the administered, verified binary with an explicit environment; without it nothing is executed. Its actions (board users only):
 - **« Enregistrer les instances autorisées »** (`set-company-instances`: companyId, instances) — which discovered instances this company may use. Nothing is deduced from the company's name any more. An instance still used by an assigned agent cannot be removed.
 - **« Affecter »** (`assign-agent`: agentId, companyId, instanceHome, profile) — the instance must be authorized for the company, the profile must exist in it (or be the agent's slug, « à préparer »), and no other agent may already hold it. Recorded with `assignedBy: user:<id>` and `assignedAt`.
 - **« Préparer et affecter »** / **« Préparer l'agent »** (`prepare-agent`: agentId, companyId, instanceHome) — creates the profile (`hermes profile create --clone`, then an **empty `.env`**) in the **explicitly chosen** authorized instance, its folders and links, and assigns the agent at the same time; for an already-assigned agent it finishes an interrupted preparation.
 - **« Désaffecter »** (`unassign-agent`).
-- a **Telegram** token field per profile (`set-telegram`).
+- a **Telegram** token field per profile (`set-telegram`; the gateway is installed with the profile's execution `HERMES_HOME`).
+- `set-hermes-binary` (companyId, binary, linkTarget?, sha256?, instanceHome?) — the administered Hermes entry point, global or for one of the company's authorized instances; verified before it is written. No UI form yet (action, migration script, or the table by hand).
+- `set-execution-root` (companyId, instanceHome, executionRoot) — the literal, short execution root of an authorized instance (`~/.h/d`); it must resolve (`realpath`) to the same instance.
 
 ### How to assign the agents (first time, or after the migration)
 1. Open the Hermes page for the company, tick its **authorized instances**, save.
@@ -37,11 +39,59 @@ The only UI: a sidebar link **Hermes** → the **instances** view. Opening it **
 3. The adapter starts the agent only once the assignment is valid and the profile usable.
 
 ### Migration of existing agents (`scripts/migrate-assignments.mjs`)
-The old `agents.json` was produced by name and is **not** converted blindly. `npm run build` then
-`node scripts/migrate-assignments.mjs --paperclip-data <paperclip>/data/instances/default/data [--company-name <id>=<Name>]`
-prints, read-only, one row per agent — companyId, agentId, name, instance, real profile, launcher, statically read `HERMES_HOME`, binary, model-account label (never a secret value) —, every **disagreement** (unknown company, instance outside the roots, no or several launchers, unreadable launcher, missing `config.yaml`, profile claimed twice) and **warning** (socket path over 100 bytes: the adapter will refuse that profile), and the proposed table. Nothing is written without `--apply`; `--apply` is refused while a disagreement remains and backs up `assignments.json` / `agents.json` first. Keep the backups for the rollback.
+The old `agents.json` was produced by name and is **not** converted blindly. `npm run build` then, from the repository:
+`node scripts/migrate-assignments.mjs --paperclip-data <paperclip>/data/instances/default/data --agent-commands <agents export.json> --hermes-binary <install>/.venv/bin/hermes [--execution-root <instance>=~/.h/<x>] [--confirm <agentId>=<instance>:<profile>] [--company-name <id>=<Name>]`
+prints, read-only, one row per agent — companyId, agentId, name, instance, real profile, the agent's `hermesCommand`, the `HERMES_HOME` that will be passed, model-account label (never a secret value), socket length —, every **disagreement** and **warning**, and the proposed table. **No launcher is run or read to authorize anything**: the `bin/` folders are only inventoried (path, sha256); files that are not launchers are ignored; a launcher **referenced by an agent** (from the Paperclip agents export) is shown and blocks `--apply` until an explicit mapping `--confirm <agentId>=<instance>:<profile>` is given, validated against the existing instances and profiles. Nothing is written without `--apply`; `--apply` is refused while a disagreement remains and backs up `assignments.json` / `agents.json` first. Keep the backups for the rollback.
 
-Files: `~/.config/hermes-control/assignments.json` (the table, mode 600; `HERMES_CONTROL_ASSIGNMENTS` overrides), `~/.config/hermes-control/agents.json` (projection; `HERMES_CONTROL_AGENTS_MAP`). With `hermes-paperclip-pack`, `donnees/identites.json` is meant to become the reference and this table its import; the two must never be maintained in parallel (see `pack/CONTRACTS.md` §1–2).
+Files (the *reference*, see below): `<reference>/assignments.json` (the table, mode 600), `<reference>/agents.json` (projection), `<reference>/roots`, `<reference>/workspace`. With `hermes-paperclip-pack`, `donnees/identites.json` is meant to become the reference and this table its import; the two must never be maintained in parallel (see `pack/CONTRACTS.md` §1–2).
+
+## Configuration contract (0.6.1)
+**One reference, shared by the plugin and the adapter**: the folder `<account home>/.config/hermes-control/`, where `<account home>` is the home directory of the Unix account that runs Paperclip **as given by the system account database** (`getpwuid`, Node `os.userInfo().homedir`) — never `$HOME`, never an environment variable. Why: Paperclip 2026.1001.0 starts the plugin worker with a filtered environment (`PATH`, `NODE_PATH`, `PAPERCLIP_PLUGIN_ID`, `NODE_ENV`, `TZ` and the deployment mode — no `HOME`, none of the service's variables; `plugin-worker-manager.js`), while the adapter runs inside the server with the full service environment. Anything read from the environment could make the two components read two different files; the account database gives both the same folder by construction (same uid).
+
+**The old variables are no longer read**: `HERMES_CONTROL_ASSIGNMENTS`, `HERMES_CONTROL_AGENTS_MAP`, `HERMES_CONTROL_ROOTS`, `HERMES_CONTROL_WORKSPACE`, `HERMES_CONTROL_HERMES_BIN`. (0.6.0's CHANGELOG wrongly said that the worker honored `HERMES_CONTROL_HERMES_BIN`: the worker never receives it.) If one of them is still set where the adapter runs, an administrator expected another reference: **every run is refused** with a message naming the reference, instead of silently falling back on the account folder; the adapter's *Test environment* reports it (the plugin worker never receives these variables, so it cannot see them).
+
+**Two Paperclip installations under the same Unix account share the same reference.** To isolate a test installation, run it under another account or in a mount namespace (`bwrap`) that binds another folder on `~/.config/hermes-control` — as the 0.6 acceptance test did.
+
+**The table** `<reference>/assignments.json`:
+```json
+{ "schemaVersion": 1,
+  "hermes":    { "binary": "/home/u/.local/share/hermes-0.21/hermes-agent/.venv/bin/hermes", "linkTarget": "…if binary is a symlink", "sha256": "…optional, enforced" },
+  "instances": { "/home/u/Projects/X/hermes/profils/direction": { "executionRoot": "~/.h/d", "hermes": { "binary": "…optional, per instance" } } },
+  "companies": { "<companyId>": { "name": "ACME", "instances": ["/home/u/Projects/X/hermes/profils/direction"] } },
+  "agents":    { "<agentId>": { "companyId": "<companyId>", "instanceHome": "/home/u/Projects/X/hermes/profils/direction", "profile": "chef", "name": "Chef", "assignedAt": "…", "assignedBy": "user:…" } } }
+```
+- `instanceHome` and the keys of `instances` are **canonical** roots (`realpath`): used to verify (authorized instance, profile claimed once, inside a known root).
+- `executionRoot` is the **literal** root passed to Hermes (absolute, or `~/…` expanded explicitly from the account home; no `.` / `..`): it must resolve to the same instance. Without it, the canonical root is passed.
+- `HERMES_HOME` = `executionRoot/profiles/<profile>`, or `executionRoot` itself for the `default` profile (unchanged from 0.6.0's `profileHome`), and its `realpath` must be exactly the assigned canonical profile (a `profiles/<p>` symlinked elsewhere is refused). The socket paths are measured on that string.
+- `approvedBinaries` (0.6.0) no longer exists: a table that contains it is refused with an explicit message.
+- **Who writes it**: the plugin's admin actions (`set-company-instances`, `assign-agent`, `unassign-agent`, `prepare-agent`, `set-hermes-binary`, `set-execution-root`), the migration script with `--apply`, or the administrator by hand (validated on every read; a corrupted table is refused, never rewritten). The projection `agents.json` is rewritten with every table write.
+- **Diagnostic**: the adapter's *Test environment* (`hermes_control.reference`), the plugin's health and the instances view show the reference path, the account it comes from and the sha256 of `assignments.json`, `roots`, `workspace`, `agents.json` (no secret).
+
+## Controlled execution (0.6.1)
+The adapter builds the command itself, before calling the official `hermes_local` adapter:
+- **binary** = the administered entry point (per instance, else global), verified before any call (even before a `--version`): absolute normalized path; regular file, or a symlink whose real target is the one written in `linkTarget`; owned by the current user; not writable by group/others (file and its folder); executable; sha256 computed (and enforced when the table gives one); format = ELF, or a **Python script with an absolute shebang** — Hermes's official entry point `<install>/.venv/bin/hermes` — whose interpreter is checked (exists, regular file, owned by the user or root, not writable by group/others) and recorded with its installation (`pyvenv.cfg`). A shell script (bash, sh…, i.e. the old launchers and the Omarchy wrapper `~/.local/bin/hermes`), a shebang through `env`, any other format → refused. The verification does not cover the Python modules the entry point imports: the installation is logged for the acceptance test.
+- **`hermesCommand` / `command` of the agent** → replaced by the administered binary (logged as « ignorée »).
+- **environment** (merged by the official adapter over the server's environment): `config.env` of the agent minus the reserved keys (`HERMES_HOME`, `PATH`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONUSERBASE`, `PYTHONINSPECT`, `VIRTUAL_ENV`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `BASH_ENV`, `ENV`, Hermes supervisor/update flags), then `HERMES_HOME` (literal) and `PATH` = interpreter folder first + the server's `PATH`; the reserved interpreter keys are set to an empty value (ignored by CPython and ld.so) so the server's own values cannot leak in. Other keys (API keys, `HERMES_*` options) pass as before.
+- **arguments**: `extraArgs` with `-p` / `--profile` is refused (Hermes would switch profile after the check); for the `default` profile, an `active_profile` file that would redirect Hermes is refused.
+- Launcher scripts stay usable by hand; Paperclip no longer uses them.
+
+## Refusals are not retried
+Paperclip 2026.1001.0 turns an exception thrown by `execute` into `errorCode: "adapter_failed"`, which its recovery classifies as `transient_infra` and re-schedules (`scheduled_retry`). A configuration refusal is therefore **returned**, not thrown: `{ exitCode: null, errorMessage, errorCode: "configuration_incomplete", resultJson: { configurationIncomplete: { reason: "hermes_control_<kind>", fingerprint, … } } }`. The server stores `errorCode = "configuration_incomplete"`; its recovery (`classifyAdapterFailureForRecovery`) classifies it `configuration_incomplete` and moves the issue to `blocked` for a human instead of retrying; no bounded transient retry applies (no `errorFamily`). Unexpected errors (disk, the official adapter itself) are still thrown and stay retryable.
+
+## Rollback (0.6.1 → 0.5.0)
+**A clean return to 0.5.0 that keeps the explicit assignments is impossible in general.** 0.5.0 has no assignment table: its adapter picks the profile **by the agent's name** at every run, across all instances, and reads `agents.json` (flat map) only for skills. After a rollback, an agent with a namesake in another instance runs in the wrong instance (wrong model account), and a renamed agent no longer runs. 0.5.0 also writes flat entries into `agents.json`, which becomes **hybrid** (0.6.1 detects and reports it, and ignores it).
+
+What is automated — `scripts/rollback-to-0.5.mjs` (read-only by default, `npm run build` first):
+1. it reads the table, simulates 0.5's name rule (same `matchAgent` code) on the instances present, for each assigned agent, with the **current** names from a Paperclip agents export (`--agents FILE`; without it the verdict is blocked, since a rename cannot be seen);
+2. verdict per agent: identical / other profile (namesake, description) / no profile (renamed); **compatible** only if all are identical;
+3. `--apply`, only if compatible: backs up `agents.json` and `assignments.json` (`*.bak-rollback-<date>`), writes the flat 0.5 map derived from the table (for skills); `assignments.json` is kept untouched (0.5 ignores it; it allows going back to 0.6.1);
+4. it prints the package commands for the administrator (nothing is installed by the script; to be checked in the acceptance test): `paperclipai plugin uninstall hermes-control` (without `--force`), `paperclipai plugin install paperclip-plugin-hermes-control@0.5.0`, `paperclipai adapter install --payload-json '{"packageName":"paperclip-adapter-hermes-control","version":"0.5.0"}'`. 0.6.1 does not modify the agents' `hermesCommand`; 0.5 needs them as they were (launchers).
+
+When the verdict is incompatible — the normal case with namesakes or renamed agents — **restore everything from the cold backup** taken before installing 0.6.1, Paperclip stopped:
+- Paperclip's database and data folder (`<data-dir>`, including `adapter-plugins/` and `adapter-plugins.json`), and `~/.paperclip/plugins` (the installed plugin);
+- `~/.config/hermes-control/` (0.5's `agents.json`, `roots`, `workspace`);
+- the Hermes instances (profiles, `config.yaml`, `.env`, `state.db`, memories) and the launchers `bin/`.
+Everything done after the backup point is lost: Paperclip issues, comments, runs and agent changes; Hermes sessions, memories and profile changes; profiles prepared by 0.6.1. The restored state is a configuration already known to work with 0.5 — it does not make 0.5 handle namesakes correctly. Then restart Paperclip and check every agent's profile (run log line « → Hermes <instance>/<profile> ») before reopening the work.
 
 ```
 paperclipai plugin install paperclip-plugin-hermes-control
@@ -55,12 +105,19 @@ Tested with Hermes 0.19 and 0.21.5, on Paperclip 2026.1001.0 (plugin SDK `@paper
 
 **Waking agents.** Agents whose task may need a confirmation (a question to a human, an approval) must be woken by **issue assignment**, never by `POST /agents/:id/wakeup` (Paperclip issue #13704): a wakeup without an issue has no continuation context, and the continuation fails with `continuation_source_context_missing`.
 
+## What 0.6.1 changes (after the 0.6 acceptance test)
+- **Controlled execution**: the adapter builds the command (administered, verified binary; literal `HERMES_HOME`; explicit environment); launchers and the agent's `hermesCommand` are never run or read; bare names are no longer « approved ».
+- **One reference** for the plugin and the adapter, from the account database, no environment variable; old variables → refusal; diagnostic with path and fingerprints.
+- **Manifest** description ≤ 500 characters, the whole manifest validated against Paperclip's real schema in the tests.
+- **Refusals not retried** (`configuration_incomplete`).
+- **Rollback** documented and partly automated; clean return declared impossible with namesakes / renamed agents.
+- **Integration**: hybrid `agents.json` detected and reported; migration ignores foreign files, never runs or reads launchers, requires an explicit mapping for a referenced launcher; `instances` data filtered by company (states, errors included); messages show `inst/a/profiles/chef`.
+
 ## What 0.6 changes
 - **Explicit assignments table** (`assignments.json`): company → authorized instances, agent → instance / profile, validated on read and write (authorized instance, no profile claimed twice, `realpath` inside a known root), written only by the assignment actions and the migration script; `agents.json` is a derived projection with the table's fingerprint. **No assignment by name**: not when the view opens, not at sync, not on rename — only a suggestion.
 - **Empty `.env` on prepare** (R02a) with a **durable preparing state** written before the clone; a partial or interrupted preparation leaves the profile unusable until cleaned. A profile made by hand is never emptied.
 - **Preparation lock** and every other lock are **lease locks**: `owner.json` (pid, host, token, renewedAt), renewed every 5 s; reclaimed only when the lease is stale and the owner dead or remote; released only by its token.
-- **View that creates nothing, runs nothing and assigns nothing**: the launcher script is read **statically**; any uncertainty is an error.
-- **Launcher uncertainty refused by the adapter**: unresolved variable, several `HERMES_HOME`, unreadable script → refusal; approved binaries (`HERMES_CONTROL_HERMES_BIN`, `approvedBinaries`, bare name) are accepted as is.
+- **View that creates nothing, runs nothing and assigns nothing** (in 0.6.0 the launcher script was read statically; replaced in 0.6.1 by the controlled execution, see above).
 - **Corrupted files are refused, never rewritten**: `config.yaml`, `assignments.json`, `agents.json`.
 - **Single Telegram gateway** guard.
 - **Assignment checked before wake** (R02b): the adapter refuses an unassigned agent, an invalid assignment, another company's assignment, a missing or unreadable `config.yaml`, an unusable profile, a too-long socket path.
@@ -77,6 +134,7 @@ npm install && npm run check            # plugin: typecheck + tests + build
 cd adapter && npm install && npm run check
 ```
 Local install: `plugin install /abs/path/hermes-control` and `adapter install --payload-json '{"packageName":"/abs/path/hermes-control/adapter","isLocalPath":true}'`.
+Tests never touch the real reference: `vitest.setup.ts` redirects the account home to a temporary `$HOME` and fails a test that would point at the real one.
 
 ## License
 MIT © Cyril M
