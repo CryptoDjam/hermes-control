@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (0.6)
+Planned, not released. Tested target: Hermes 0.19 and 0.21.5.
+- Profiles prepared with an **empty `.env`** (today `hermes profile create --clone` copies the instance's API keys and Telegram token into the new profile).
+- **Lock** against double preparation of the same agent (`agent.created` and the view firing together).
+- **Strict `companyInstance`**: the profile is cloned only from the company's own instance (several roots per company), never from the first instance found.
+- **Instances view without side effects**: opening the Hermes page never creates a profile, folders or links any more; only `agent.created` / `agent.updated` and the « Préparer l'agent » button prepare an agent.
+- **Single Telegram gateway guard**: a token is refused when another profile on the machine already runs the gateway (one `hermes-gateway.service` per user).
+- **`doctor`**: checks the plugin's `localPath` registration in Paperclip (a locally installed plugin breaks silently when its folder moves) and the YAML front matter of the skills.
+- Note for operators: agents whose task may need a confirmation must be woken by issue assignment, never by `POST /agents/:id/wakeup` (Paperclip issue #13704), otherwise the continuation fails with `continuation_source_context_missing`.
+- 44 tests today (29 plugin + 15 adapter).
+
 ## 0.5.0 — 2026-10-04
 - **An agent created in Paperclip gets its Hermes profile automatically.** With a shared workspace declared in `~/.config/hermes-control/workspace` (written by `hermes-paperclip-pack init`), a Hermes agent with no matching profile is prepared on `agent.created` / `agent.updated` and when the Hermes page is opened: `hermes profile create <slug> --no-alias --clone --description "<Name> — <title>"` in the company instance, `<ws>/agents/<slug>/{fiche.md, rapports/, memoire/{MEMORY.md,USER.md}, medias/{brouillons,valides,publies}/}`, `memories` → `agents/<slug>/memoire` (existing Hermes memory files are moved, never lost), `journal` → the profile's `logs/`, common skills of `<ws>/hermes/skills` linked, `SOUL.md` from `<ws>/modeles/`. Idempotent, never deletes. The 5-minute job (no company scope) never creates anything.
 - **Page**: a « Dossiers communs » card (workspace paths), a **« Préparer l'agent »** button for agents without profile (action `prepare-agent`, board users only), and a **Telegram** column per profile: the bot token is written to `<profile>/.env` (mode 600) and `hermes gateway install --start-now` is run for that profile; the token is never read back, shown or stored in plugin state (action `set-telegram`, only for known profile paths). New capability `ui.action.register` (Paperclip refuses an in-place upgrade on new capabilities: uninstall / reinstall the plugin).
@@ -11,7 +22,7 @@
 - **Skills follow the agent into its Hermes profile.** The built-in Hermes adapter links Paperclip-managed skills into `~/.hermes/skills` (it resolves `$HOME`, never `HERMES_HOME`), but Hermes only loads `$HERMES_HOME/skills`. Since Hermes Control runs each agent on its own profile, the skills were invisible there (seen on CDjam: Chef could not find `first-task`). The adapter now links every skill assigned in Paperclip into `<profile>/skills/<name>` — on skill sync (the Skills tab) and at the start of every run — and removes the link when a skill is unassigned. Only links that point to a Paperclip source are ever removed; skills you placed in the profile yourself are left alone and listed read-only in the Skills tab.
 - New shared map `~/.config/hermes-control/agents.json` (agent id → instance/profile/home), written by the adapter at run time and by the plugin at every sync, because Paperclip's `listSkills` / `syncSkills` hooks only carry the agent id.
 - `listSkills` / `syncSkills` overrides: the Skills tab shows the real link path in the profile, and a warning when the agent's profile is not known yet.
-- Nothing removed: Provider/Model menus, name → profile, provider/model/thinking sync and the instances view are unchanged. 48 tests.
+- Nothing removed: Provider/Model menus, name → profile, provider/model/thinking sync and the instances view are unchanged. 33 tests.
 
 ## 0.3.0 — 2026-10-03
 - **Rethought after feedback**: no more choice pages. Paperclip's own agent form is the control surface.

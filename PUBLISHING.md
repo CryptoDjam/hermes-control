@@ -1,7 +1,7 @@
 # Publier Hermes Control (aide-mémoire)
 
 ## 1. Compte npm
-Compte : `cyberservices-ai` (e-mail ineeddbox@gmail.com). npm exige, pour publier, **soit** la 2FA du compte (code à usage unique à chaque publication), **soit** un jeton granulaire avec **« Bypass two-factor authentication »**.
+Compte : `cyberservices-ai` (the npm account owner's e-mail). npm exige, pour publier, **soit** la 2FA du compte (code à usage unique à chaque publication), **soit** un jeton granulaire avec **« Bypass two-factor authentication »**.
 
 - Jeton avec bypass (recommandé) : npmjs.com → avatar → Access Tokens → Generate New Token → Granular → Read and write, All packages, cocher *Bypass 2FA* → copier → sur le PC : `npm-jeton` (colle, Entrée) → `npm whoami`.
 - Sans bypass : garder une application d'authentification sous la main et publier avec `scripts/publish.sh <code 2FA>`.
@@ -29,12 +29,14 @@ Nouvelle version : changer `version` dans `package.json` **et** `adapter/package
 ## 3. Après la première publication : publication sans jeton (GitHub Actions)
 Sur npmjs.com, pour chaque paquet : Package → Settings → **Trusted Publishing** → GitHub Actions → owner `CryptoDjam`, repo `hermes-control`, workflow `publish.yml`. Ensuite, créer une *release* GitHub (tag `vX.Y.Z`) publie les deux paquets automatiquement, avec provenance, sans jeton ni 2FA (`.github/workflows/publish.yml`).
 
+**Warning — owner rename.** Trusted Publishing is bound to the exact GitHub owner / repository / workflow. After the GitHub owner is renamed from `CryptoDjam` to `cyberservices-ai`, the Trusted Publishing configuration of **both** packages must be redone on npmjs.com (owner `cyberservices-ai`, repo `hermes-control`, workflow `publish.yml`); until then releases from GitHub Actions will be refused.
+
 ## 4. Catalogue Paperclip Hub + awesome-paperclip
 - Hub : https://cliphub.fyi → *Submit a plugin* → nom npm `paperclip-plugin-hermes-control` (le Hub lit le manifeste depuis npm et vérifie que le compte soumis est mainteneur npm). Texte prêt : `docs/hub-submission.md`.
 - awesome-paperclip : https://github.com/gsxdsm/awesome-paperclip → PR ajoutant la ligne de `docs/hub-submission.md`.
 
 ## 5. Vérifier
-`npm view paperclip-plugin-hermes-control version` et `npm view paperclip-adapter-hermes-control version` → 0.4.0 ; `npx paperclipai plugin install paperclip-plugin-hermes-control` fonctionne sur une instance vierge.
+`npm view paperclip-plugin-hermes-control version` et `npm view paperclip-adapter-hermes-control version` → 0.5.0 ; `npx paperclipai plugin install paperclip-plugin-hermes-control` fonctionne sur une instance vierge.
 
 ### Vu le 2026-10-05 (17:37)
 - Le plugin n'avait jamais été republié après la dépublication du 03/10 (24 h passées le 05/10 à 01:07). `scripts/publish.sh` sans code : **adaptateur 0.5.0 et plugin 0.5.0 acceptés** (`+ …@0.5.0`) mais tous deux en **staging** : `npm view` montre encore adaptateur `latest 0.4.0` et plugin `latest 0.0.0-stage`. → approuvés par Cyril : `latest` = 0.5.0 pour les deux depuis 17:42.

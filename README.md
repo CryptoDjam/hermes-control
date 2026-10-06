@@ -19,17 +19,30 @@ paperclipai adapter install --payload-json '{"packageName":"paperclip-adapter-he
 ```
 Where instances are: `~/.hermes`, plus the folders listed in `~/.config/hermes-control/roots` (one per line: an instance, or a folder of instances), plus `$HERMES_CONTROL_ROOTS`. Roll back any time: `paperclipai adapter override hermes_local` (pause) or `adapter delete hermes_local`.
 
-## 2. The plugin — Paperclip → Hermes sync, one read-only view
+## 2. The plugin — Paperclip → Hermes sync, one view
 Paperclip is the master. For every Hermes agent, the plugin reads **name, working directory, provider, model, thinking** from Paperclip, finds the Hermes profile by name, and writes **provider / model / thinking** into that profile's `config.yaml` (`hermes config set`, no shell, only when different). It runs on `agent.updated` / `agent.created`, when the view is opened, and every 5 minutes.
 
-The only UI: a sidebar link **Hermes** → the **instances** view (instance · profile · agent · provider/model sent · working directory · auth status · last sync). No settings page, no actions.
+The only UI: a sidebar link **Hermes** → the **instances** view (instance · profile · agent · provider/model sent · working directory · auth status · last sync). No settings page. The view has exactly two actions, both from 0.5 (see 3): **« Préparer l'agent »** (prepare the Hermes profile of an agent that has none) and a **Telegram** token field per profile. Note that in 0.5 *opening* the view also runs the automatic preparation when the `workspace` file exists, so it can create profiles as a side effect; 0.6 makes the view free of side effects (see the roadmap below).
 
 ```
 paperclipai plugin install paperclip-plugin-hermes-control
 ```
 
 ## 3. With `hermes-paperclip-pack`: agents prepare themselves (0.5)
-When a shared workspace is declared in `~/.config/hermes-control/workspace` (one line, written by [`hermes-paperclip-pack init`](https://github.com/CryptoDjam/hermes-paperclip-pack)), a Hermes agent created in Paperclip with no matching profile is **prepared automatically**: profile cloned from the company instance, folders `<ws>/agents/<slug>/…`, memory and journal links, common skills, SOUL from the templates. The Hermes page shows the common folders, a « Préparer l'agent » button as a fallback, and a Telegram token field per profile (written to the profile's `.env`, mode 600, never shown again). Without that file nothing is created automatically.
+When a shared workspace is declared in `~/.config/hermes-control/workspace` (one line, written by `hermes-paperclip-pack init` — the companion pack, private for now, publication planned), a Hermes agent created in Paperclip with no matching profile is **prepared automatically**: profile cloned from the company instance, folders `<ws>/agents/<slug>/…`, memory and journal links, common skills, SOUL from the templates. The Hermes page shows the common folders, a « Préparer l'agent » button as a fallback, and a Telegram token field per profile (written to the profile's `.env`, mode 600, never shown again). Without that file nothing is created automatically.
+
+## Compatibility
+Tested with Hermes 0.19 and 0.21.5, on Paperclip 2026.1001.0 (plugin SDK `@paperclipai/plugin-sdk` 2026.1001.0).
+
+**Waking agents.** Agents whose task may need a confirmation (a question to a human, an approval) must be woken by **issue assignment**, never by `POST /agents/:id/wakeup` (Paperclip issue #13704): a wakeup without an issue has no continuation context, and the continuation fails with `continuation_source_context_missing`.
+
+## Roadmap (0.6, unreleased)
+- Profiles prepared with an **empty `.env`** (`hermes profile create --clone` copies the instance's keys and Telegram token today — see the security note).
+- A **lock** against double preparation of the same agent (two triggers at once: `agent.created` + the view).
+- **Strict `companyInstance`**: the profile is cloned only from the company's own instance (several roots per company), never from the first instance found.
+- The **instances view has no side effects**: opening it never creates a profile, folders or links; only `agent.created` / `agent.updated` and the « Préparer l'agent » button do.
+- A **single Telegram gateway** guard: a token is refused when another profile on the machine already runs the gateway (Hermes installs one `hermes-gateway.service` per user).
+- A `doctor` check that verifies the plugin's **`localPath`** registration in Paperclip (a locally installed plugin breaks silently when its folder moves) and the YAML front matter of the skills.
 
 ## Security note
 
