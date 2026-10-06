@@ -2,7 +2,7 @@
 // et exécution contrôlée du CLI hermes (sans shell, arguments séparés).
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, stat, readdir, access } from "node:fs/promises";
+import { readFile, realpath, stat, readdir, access } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -20,6 +20,7 @@ export interface HermesProfile {
   approvalsMode: string | null;
   terminalBackend: string | null;
   toolsets: string[];
+  configError: string | null; // config.yaml présent mais illisible (YAML invalide ou pas un objet) : jamais synchronisé
 }
 
 export interface HermesInstance {
@@ -75,7 +76,10 @@ export async function hermes(home: string, args: string[], binary = "hermes", ti
   return stdout;
 }
 
-/** Retrouve le HERMES_HOME derrière un lanceur (hermesCommand) : `<lanceur> config path` → …/config.yaml */
+/**
+ * @deprecated Exécute le lanceur (`<lanceur> config path`) : la vue ne doit rien exécuter. Préférer homeFromLauncherFile.
+ * Retrouve le HERMES_HOME derrière un lanceur (hermesCommand) : `<lanceur> config path` → …/config.yaml
+ */
 export async function resolveHomeFromLauncher(launcher: string): Promise<string | null> {
   const path = resolve(launcher);
   if (!(await exists(path))) return null;
@@ -87,6 +91,62 @@ export async function resolveHomeFromLauncher(launcher: string): Promise<string 
   } catch {
     return null;
   }
+}
+
+const LAUNCHER_MAX_BYTES = 64 * 1024;
+const ASSIGN_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+
+function unquote(v: string): string {
+  const t = v.trim();
+  const q = /^"([^"]*)"|^'([^']*)'/.exec(t); // valeur entre guillemets (un commentaire peut suivre)
+  if (q) return q[1] ?? q[2] ?? "";
+  return t.split(/\s+#/)[0]!.trim();
+}
+
+/** Remplace $VAR / ${VAR} / ~ par les valeurs connues ; null si une variable reste inconnue ou si la valeur n'est pas littérale. */
+function expand(value: string, vars: Record<string, string>): string | null {
+  if (/\$\(|`|\$\{[A-Za-z_][A-Za-z0-9_]*[:#%/]/.test(value)) return null; // sous-shell ou expansion conditionnelle : pas littéral
+  let missing = false;
+  let out = value.replace(/^~(?=\/|$)/, vars["HOME"] ?? "~");
+  out = out.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_, a: string | undefined, b: string | undefined) => {
+    const v = vars[(a ?? b)!];
+    if (v === undefined) missing = true;
+    return v ?? "";
+  });
+  return missing ? null : out;
+}
+
+/**
+ * HERMES_HOME d'un lanceur (hermesCommand) par lecture STATIQUE du script, sans l'exécuter : ligne `HERMES_HOME=…`,
+ * avec $HOME / ~ → homedir, $PROJETC → <dossier du lanceur>/../.. (nos lanceurs le calculent ainsi) et toute variable
+ * affectée littéralement plus haut dans le fichier. Sinon null (fichier absent, trop gros, binaire, ou valeur non résolue).
+ */
+export async function homeFromLauncherFile(launcher: string): Promise<string | null> {
+  let path = resolve(launcher);
+  try {
+    path = await realpath(path); // les lanceurs font `readlink -f "$0"`
+    const st = await stat(path);
+    if (!st.isFile() || st.size > LAUNCHER_MAX_BYTES) return null;
+  } catch {
+    return null;
+  }
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+  if (text.includes("\0")) return null; // binaire : rien à lire
+  const vars: Record<string, string> = { HOME: homedir(), PROJETC: resolve(dirname(path), "..", "..") };
+  for (const line of text.split("\n")) {
+    const m = ASSIGN_RE.exec(line);
+    if (!m) continue;
+    const [, name, raw] = m as unknown as [string, string, string];
+    const value = expand(unquote(raw), vars);
+    if (name === "HERMES_HOME") return value && value.startsWith("/") ? resolve(value) : null;
+    if (value !== null) vars[name] = value;
+  }
+  return null;
 }
 
 export function parseConfig(text: string): Record<string, unknown> {
@@ -107,12 +167,27 @@ function pick(obj: Record<string, unknown>, path: string[]): unknown {
   return cur;
 }
 
-async function readConfig(home: string): Promise<Record<string, unknown>> {
+/**
+ * Lecture stricte de <home>/config.yaml : absent → {} sans erreur ; présent mais YAML invalide, ou qui n'est pas un objet
+ * → `error` renseigné (le fichier n'est jamais réécrit ; vide ou commentaires seuls = objet vide, valide).
+ */
+export async function readConfigStrict(home: string): Promise<{ cfg: Record<string, unknown>; error: string | null }> {
+  let text: string;
   try {
-    return parseConfig(await readFile(join(home, "config.yaml"), "utf8"));
-  } catch {
-    return {};
+    text = await readFile(join(home, "config.yaml"), "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { cfg: {}, error: null };
+    return { cfg: {}, error: `config.yaml illisible : ${(e as Error).message}` };
   }
+  let doc: unknown;
+  try {
+    doc = YAML.parse(text);
+  } catch (e) {
+    return { cfg: {}, error: `config.yaml invalide : ${(e as Error).message.split("\n")[0]}` };
+  }
+  if (doc === null || doc === undefined) return { cfg: {}, error: null };
+  if (typeof doc !== "object" || Array.isArray(doc)) return { cfg: {}, error: `config.yaml invalide : le contenu n'est pas un objet (${Array.isArray(doc) ? "liste" : typeof doc})` };
+  return { cfg: doc as Record<string, unknown>, error: null };
 }
 
 async function readDescription(home: string): Promise<string | null> {
@@ -142,7 +217,7 @@ async function readAuth(home: string, provider: string | null, binary: string): 
 }
 
 async function readProfile(name: string, home: string, binary: string, light = false): Promise<HermesProfile> {
-  const cfg = await readConfig(home);
+  const { cfg, error: configError } = await readConfigStrict(home);
   const model = pick(cfg, ["model", "default"]);
   const provider = pick(cfg, ["model", "provider"]);
   const toolsets = pick(cfg, ["toolsets"]);
@@ -157,6 +232,7 @@ async function readProfile(name: string, home: string, binary: string, light = f
     approvalsMode: (pick(cfg, ["approvals", "mode"]) as string | undefined) ?? null,
     terminalBackend: (pick(cfg, ["terminal", "backend"]) as string | undefined) ?? null,
     toolsets: Array.isArray(toolsets) ? toolsets.map(String) : [],
+    configError,
   };
 }
 

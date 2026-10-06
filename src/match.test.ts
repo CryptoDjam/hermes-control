@@ -3,7 +3,7 @@ import { matchAgent, slug } from "./match.js";
 import type { HermesInstance, HermesProfile } from "./hermes.js";
 
 function prof(name: string, description: string | null): HermesProfile {
-  return { name, home: `/i/${name}`, description, model: "m", provider: "openai-codex", authStatus: "logged_in", approvalsMode: null, terminalBackend: null, toolsets: [] };
+  return { name, home: `/i/${name}`, description, model: "m", provider: "openai-codex", authStatus: "logged_in", approvalsMode: null, terminalBackend: null, toolsets: [], configError: null };
 }
 const instances: HermesInstance[] = [
   { name: "direction", home: "/i/direction", launcher: null, dashboardUrl: null, errors24h: 0, lastError: null, profiles: [prof("default", "Chef — PDG de CDjam"), prof("assistant", "Assistant de Chef (PDG de CDjam) : suivi")] },

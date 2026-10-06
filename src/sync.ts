@@ -1,8 +1,6 @@
 // Paperclip est le maître : provider / modèle / thinking choisis dans le menu de l'agent sont écrits
 // dans le config.yaml du profil Hermes trouvé par le nom. On n'écrit que ce qui change.
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { hermes, parseConfig } from "./hermes.js";
+import { hermes, readConfigStrict } from "./hermes.js";
 
 export interface Desired {
   provider: string | null; // adapterConfig.provider
@@ -43,15 +41,17 @@ function pick(cfg: Record<string, unknown>, path: string[]): string | null {
   return typeof cur === "string" ? cur : cur == null ? null : String(cur);
 }
 
-/** Compare le config.yaml du profil aux valeurs Paperclip et écrit les différences avec `hermes config set`. */
+/** Message d'un profil dont le config.yaml est illisible : on refuse d'écrire, jamais de réécriture. */
+export function unreadableConfigError(configError: string): string {
+  return `${configError} ; aucune écriture`;
+}
+
+/** Compare le config.yaml du profil aux valeurs Paperclip et écrit les différences avec `hermes config set`.
+ *  Un config.yaml invalide → aucun `hermes config set` (le fichier n'est pas touché). */
 export async function syncProfile(home: string, want: Desired, binary = "hermes"): Promise<SyncResult> {
   const res: SyncResult = { changed: [], skipped: [], error: null };
-  let cfg: Record<string, unknown> = {};
-  try {
-    cfg = parseConfig(await readFile(join(home, "config.yaml"), "utf8"));
-  } catch (e) {
-    return { ...res, error: `config.yaml illisible : ${String(e)}` };
-  }
+  const { cfg, error } = await readConfigStrict(home);
+  if (error) return { ...res, error: unreadableConfigError(error) };
   const plan: { key: string; value: string | null; current: string | null; ok: RegExp }[] = [
     { key: "model.provider", value: want.provider && want.provider !== "auto" ? want.provider : null, current: pick(cfg, ["model", "provider"]), ok: PROVIDER_RE },
     { key: "model.default", value: want.model, current: pick(cfg, ["model", "default"]), ok: MODEL_RE },

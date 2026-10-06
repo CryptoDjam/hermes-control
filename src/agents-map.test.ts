@@ -38,3 +38,31 @@ describe("carte agentId → profil Hermes", () => {
     expect((await recallAgent("a2"))?.home).toBe("/x/marketing");
   });
 });
+
+describe("agents.json corrompu et verrou", () => {
+  it("fichier corrompu : rememberAgent refuse et ne touche pas au fichier ; recallAgent rend null", async () => {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { dirname } = await import("node:path");
+    await mkdir(dirname(agentsMapFile()), { recursive: true });
+    await writeFile(agentsMapFile(), "{ pas du json\n");
+    await expect(rememberAgent("a1", { name: "Chef", instance: "direction", profile: "default", home: "/x" })).rejects.toThrow(/corrompu.*rien n'est écrit/);
+    expect(await readFile(agentsMapFile(), "utf8")).toBe("{ pas du json\n");
+    expect(await recallAgent("a1")).toBeNull();
+    const { agentsMapError } = await import("./agents-map.js");
+    expect(await agentsMapError()).toMatch(/corrompu/);
+    await writeFile(agentsMapFile(), "[1,2]\n");
+    await expect(rememberAgent("a1", { name: "Chef", instance: "direction", profile: "default", home: "/x" })).rejects.toThrow(/pas un objet/);
+    expect(await readFile(agentsMapFile(), "utf8")).toBe("[1,2]\n");
+  });
+
+  it("deux rememberAgent concurrents → les deux entrées présentes (verrou agents.json.lock relâché)", async () => {
+    await Promise.all([
+      rememberAgent("a1", { name: "Chef", instance: "direction", profile: "default", home: "/x/direction" }),
+      rememberAgent("a2", { name: "CMO", instance: "marketing", profile: "default", home: "/x/marketing" }),
+    ]);
+    const raw = JSON.parse(await readFile(agentsMapFile(), "utf8")) as Record<string, unknown>;
+    expect(Object.keys(raw).sort()).toEqual(["a1", "a2"]);
+    const { lstat } = await import("node:fs/promises");
+    await expect(lstat(`${agentsMapFile()}.lock`)).rejects.toThrow();
+  });
+});

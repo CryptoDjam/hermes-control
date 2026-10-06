@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { desiredFromAdapterConfig, syncProfile } from "./sync.js";
@@ -33,5 +33,23 @@ describe("syncProfile", () => {
     const r = await syncProfile(home, { provider: null, model: "b", thinking: null }, "/bin/false");
     expect(r.changed).toEqual([]);
     expect(r.error).toContain("model.default");
+  });
+});
+
+describe("syncProfile : config.yaml corrompu", () => {
+  it("refuse d'écrire (aucun hermes config set) et le signale ; le fichier n'est pas touché", async () => {
+    const { chmod } = await import("node:fs/promises");
+    const home = await mkdtemp(join(tmpdir(), "hc-sync-"));
+    await writeFile(join(home, "config.yaml"), "model: [oops\n");
+    const marker = join(home, "hermes-called");
+    const bin = join(home, "hermes");
+    await writeFile(bin, `#!/bin/bash\ntouch "${marker}"\n`);
+    await chmod(bin, 0o755);
+    const r = await syncProfile(home, { provider: "openai-codex", model: "b", thinking: null }, bin);
+    expect(r.changed).toEqual([]);
+    expect(r.error).toMatch(/config.yaml invalide.*aucune écriture/);
+    const { access } = await import("node:fs/promises");
+    await expect(access(marker)).rejects.toThrow();
+    expect(await readFile(join(home, "config.yaml"), "utf8")).toBe("model: [oops\n");
   });
 });

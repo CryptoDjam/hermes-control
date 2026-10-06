@@ -2,7 +2,9 @@
 // l'entreprise, ses dossiers dans <ws>/agents/<agent>/, ses liens (mémoire, journal, skills communs) et ses fichiers
 // de départ depuis les gabarits de <ws>/modeles/. Idempotent : relancer ne casse rien, complète ce qui manque.
 // Jamais de suppression. Pas de shell : `hermes profile create` via execFile.
-import { lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+// Le profil est préparé avec un `.env` VIDE (R02a : `--clone` copie les clés et le jeton Telegram de l'instance ; on les retire),
+// sous un verrou par agent (`<instance>/.hermes-control/prepare-<slug>.lock`) : deux déclencheurs à la fois → une seule préparation.
+import { chmod, lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import { assertSafeName, profileCreate, profileHome } from "./hermes.js";
 import { slug } from "./match.js";
@@ -64,6 +66,45 @@ statut: préparé automatiquement par Hermes Control le {{date}}
 (aucun)
 `,
 };
+
+export const EMPTY_ENV = "# Rendu par le gestionnaire de connexions ; aucune clé héritée de l'instance.\n";
+const PREPARE_LOCK_STALE_MS = 10 * 60 * 1000;
+
+/** Remplace <home>/.env par le fichier vide (en-tête seul), mode 600 : aucune clé héritée du clone. */
+export async function writeEmptyEnv(home: string): Promise<void> {
+  const file = join(home, ".env");
+  await writeFile(file, EMPTY_ENV, { mode: 0o600 });
+  await chmod(file, 0o600);
+}
+
+/**
+ * Verrou de préparation d'un agent : dossier `<instanceHome>/.hermes-control/prepare-<slug>.lock` (mkdir atomique).
+ * Périmé après 10 min (processus mort) → repris ; sinon erreur claire « préparation déjà en cours ».
+ */
+export async function withPrepareLock<T>(instanceHome: string, agentSlug: string, fn: () => Promise<T>): Promise<T> {
+  const dir = join(instanceHome, ".hermes-control");
+  const lock = join(dir, `prepare-${assertSafeName(agentSlug)}.lock`);
+  await mkdir(dir, { recursive: true });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await mkdir(lock);
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const st = await stat(lock).catch(() => null);
+      if (st && Date.now() - st.mtimeMs > PREPARE_LOCK_STALE_MS && attempt === 0) {
+        await rm(lock, { recursive: true, force: true }); // verrou oublié : repris
+        continue;
+      }
+      throw new Error(`préparation déjà en cours pour « ${agentSlug} » (verrou ${lock})`);
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await rm(lock, { recursive: true, force: true });
+  }
+}
 
 function render(tpl: string, vars: Record<string, string>): string {
   return tpl.replace(/\{\{(\w+)\}\}/g, (_, k: string) => vars[k] ?? "");
@@ -138,10 +179,14 @@ async function commonSkills(ws: Workspace): Promise<string[]> {
 }
 
 export async function prepareAgent(input: PrepareInput): Promise<PrepareResult> {
-  const binary = input.binary ?? "hermes";
   const s = slug(input.agentName);
   if (!s) throw new Error(`nom d'agent inutilisable : « ${input.agentName} »`);
   assertSafeName(s);
+  return withPrepareLock(input.instanceHome, s, () => prepareLocked(input, s));
+}
+
+async function prepareLocked(input: PrepareInput, s: string): Promise<PrepareResult> {
+  const binary = input.binary ?? "hermes";
   const created: string[] = [];
   const warnings: string[] = [];
   const home = profileHome(input.instanceHome, s);
@@ -151,6 +196,10 @@ export async function prepareAgent(input: PrepareInput): Promise<PrepareResult> 
     const description = input.title ? `${input.agentName} — ${input.title}` : input.agentName;
     await profileCreate(input.instanceHome, s, description, binary, { clone: true });
     created.push(`profil Hermes ${basename(input.instanceHome)}/${s}`);
+    if (!(await exists(join(home, "config.yaml")))) throw new Error(`le profil ${home} n'a pas été créé par hermes`);
+    // R02a : le clone a copié le .env de l'instance (clés, jeton Telegram) → remplacé par un .env vide
+    await writeEmptyEnv(home);
+    created.push(`${join(home, ".env")} (vide)`);
   }
   if (!(await exists(join(home, "config.yaml")))) throw new Error(`le profil ${home} n'a pas été créé par hermes`);
 

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareAgent } from "./prepare.js";
+import { EMPTY_ENV, prepareAgent, withPrepareLock } from "./prepare.js";
 import { layout } from "./workspace.js";
 
 let root: string;
@@ -17,6 +17,7 @@ set -e
 if [ "$1" = "profile" ] && [ "$2" = "create" ]; then
   p="$HERMES_HOME/profiles/$3"; mkdir -p "$p/skills" "$p/memories"
   cp "$HERMES_HOME/config.yaml" "$p/config.yaml"; echo "# soul instance" > "$p/SOUL.md"; echo "x" > "$p/memories/MEMORY.md"
+  [ -f "$HERMES_HOME/.env" ] && cp "$HERMES_HOME/.env" "$p/.env"  # comme le vrai --clone : les clés de l'instance suivent
   echo "created $3"; exit 0
 fi
 echo "fake hermes: $*" >&2; exit 1
@@ -33,6 +34,7 @@ beforeEach(async () => {
   const ws = layout(join(root, "ws"));
   await mkdir(join(ws.profils, "acme"), { recursive: true });
   await writeFile(join(ws.profils, "acme", "config.yaml"), "model:\n  provider: openai-codex\n  default: gpt-5.6-luna\n");
+  await writeFile(join(ws.profils, "acme", ".env"), "OPENAI_API_KEY=marqueur\nTELEGRAM_BOT_TOKEN=marqueur\n");
   await mkdir(join(ws.skills, "rapport"), { recursive: true });
   await writeFile(join(ws.skills, "rapport", "SKILL.md"), "---\nname: rapport\n---\n");
   await mkdir(ws.modeles, { recursive: true });
@@ -103,6 +105,46 @@ describe("prepareAgent", () => {
     const r = await prepareAgent({ ws, instanceHome: inst, agentName: "CMO", binary: fakeHermes });
     expect(r.warnings).toEqual([]);
     expect(await readlink(join(r.profileHome, "skills", "rapport"))).toBe("../../../skills/rapport");
+  });
+
+  it("R02a : le profil préparé a un .env vide (en-tête seul, mode 600), aucune clé héritée de l'instance", async () => {
+    const ws = layout(join(root, "ws"));
+    const r = await prepareAgent({ ws, instanceHome: join(ws.profils, "acme"), agentName: "Apolline M", binary: fakeHermes });
+    const env = await readFile(join(r.profileHome, ".env"), "utf8");
+    expect(env).toBe(EMPTY_ENV);
+    expect(env).not.toContain("marqueur");
+    expect(env).not.toMatch(/OPENAI_API_KEY|TELEGRAM_BOT_TOKEN/);
+    expect((await stat(join(r.profileHome, ".env"))).mode & 0o777).toBe(0o600);
+    expect(r.created.some((c) => c.endsWith(".env (vide)"))).toBe(true);
+    // l'instance garde ses clés : on ne touche qu'au profil
+    expect(await readFile(join(ws.profils, "acme", ".env"), "utf8")).toContain("marqueur");
+  });
+
+  it("verrou : deux préparations concurrentes du même agent → une seule passe, l'autre reçoit « déjà en cours », aucun doublon", async () => {
+    const ws = layout(join(root, "ws"));
+    const inst = join(ws.profils, "acme");
+    const run = () => prepareAgent({ ws, instanceHome: inst, agentName: "Chef", binary: fakeHermes });
+    const results = await Promise.allSettled([run(), run()]);
+    const ok = results.filter((r) => r.status === "fulfilled");
+    const ko = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    expect(ok).toHaveLength(1);
+    expect(ko).toHaveLength(1);
+    expect(ko[0]!.reason.message).toMatch(/déjà en cours/);
+    expect((ok[0] as PromiseFulfilledResult<{ created: string[] }>).value.created.filter((c) => c.startsWith("profil Hermes"))).toHaveLength(1);
+    // le verrou est relâché : un troisième passage (idempotent) passe
+    expect((await run()).created).toEqual([]);
+    await expect(lstat(join(inst, ".hermes-control", "prepare-chef.lock"))).rejects.toThrow();
+  });
+
+  it("verrou périmé (plus de 10 min) : repris ; verrou récent : refus", async () => {
+    const ws = layout(join(root, "ws"));
+    const inst = join(ws.profils, "acme");
+    const lock = join(inst, ".hermes-control", "prepare-chef.lock");
+    await mkdir(lock, { recursive: true });
+    await expect(withPrepareLock(inst, "chef", async () => "x")).rejects.toThrow(/déjà en cours/);
+    const old = new Date(Date.now() - 11 * 60 * 1000);
+    await utimes(lock, old, old);
+    expect(await withPrepareLock(inst, "chef", async () => "x")).toBe("x");
   });
 
   it("refuse un nom inutilisable", async () => {

@@ -1,21 +1,24 @@
-// Worker du plugin Hermes Control (v0.5). Paperclip est le maître :
+// Worker du plugin Hermes Control (v0.6). Paperclip est le maître :
 //  - pour chaque agent Hermes, le NOM choisit le profil Hermes ; provider / modèle / thinking choisis dans
 //    le menu de l'agent sont écrits dans le config.yaml de ce profil (`hermes config set`, sans shell) ;
 //  - un agent Hermes créé dans Paperclip sans profil → son profil, ses dossiers et ses liens sont préparés
-//    automatiquement (dossier de travail commun, voir workspace.ts) ; bouton « Préparer » en secours ;
+//    sur `agent.created` / `agent.updated` ou par le bouton « Préparer » ; JAMAIS en ouvrant la vue ;
+//  - la vue ne lance aucun lanceur d'agent (lecture statique du script) et n'écrit rien ;
+//  - un config.yaml ou un agents.json corrompu → refus, jamais de réécriture ;
 //  - une seule donnée exposée à l'interface : « instances » ; deux actions : prepare-agent, set-telegram.
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { instanceHomes } from "./discovery.js";
-import { type HermesInstance, detectDashboards, instanceNameFromHome, readInstance, resolveHomeFromLauncher } from "./hermes.js";
-import { matchAgent, slug } from "./match.js";
-import { rememberAgent } from "./agents-map.js";
+import { type HermesInstance, detectDashboards, homeFromLauncherFile, instanceNameFromHome, readInstance } from "./hermes.js";
+import { matchAgent } from "./match.js";
+import { agentsMapError, rememberAgent } from "./agents-map.js";
+import { companyInstance } from "./company-instance.js";
+import { type AgentState, type ProfileHealth, agentState, checkProfile } from "./health.js";
 import { prepareAgent } from "./prepare.js";
-import { setTelegramToken, startGateway, telegramConfigured } from "./telegram.js";
-import { type Workspace, exists, readWorkspace } from "./workspace.js";
-import { join } from "node:path";
-import { type Desired, desiredFromAdapterConfig, syncProfile } from "./sync.js";
+import { assertGatewayFree, setTelegramToken, startGateway, telegramConfigured } from "./telegram.js";
+import { exists, readWorkspace } from "./workspace.js";
+import { type Desired, desiredFromAdapterConfig, syncProfile, unreadableConfigError } from "./sync.js";
 
 interface AgentLike {
   id: string;
@@ -53,11 +56,19 @@ interface SyncRecord {
 
 const SNAPSHOT_KEY = { scopeKind: "instance" as const, stateKey: "agents" };
 const SYNC_KEY = { scopeKind: "instance" as const, stateKey: "sync" };
-const BINARY = "hermes";
+
+/** Binaire Hermes : HERMES_CONTROL_HERMES_BIN (chemin explicite) sinon « hermes » dans le PATH de Paperclip. */
+function hermesBinary(): string {
+  return process.env["HERMES_CONTROL_HERMES_BIN"]?.trim() || "hermes";
+}
+
+/** Sonde de santé posée par setup() ; onHealth n'a pas de contexte Paperclip. */
+let healthProbe: (() => Promise<string[]>) | null = null;
 
 const plugin = definePlugin({
   async setup(ctx: PluginContext) {
     const log = ctx.logger;
+    const BINARY = hermesBinary();
     const launcherHomes = new Map<string, string | null>();
 
     /** Agents Hermes de l'entreprise, réduits aux données utiles. */
@@ -74,12 +85,12 @@ const plugin = definePlugin({
       return out;
     }
 
-    /** Instances : racines configurées (~/.hermes, ~/.hermes-control) + celles derrière les lanceurs des agents. */
+    /** Instances : racines configurées (~/.hermes, roots) + celles lues STATIQUEMENT dans les lanceurs des agents (jamais exécutés). */
     async function instances(snap: AgentSnapshot[], light: boolean): Promise<HermesInstance[]> {
       const extra: string[] = [];
       for (const a of snap) {
         if (!a.launcher) continue;
-        if (!launcherHomes.has(a.launcher)) launcherHomes.set(a.launcher, await resolveHomeFromLauncher(a.launcher));
+        if (!launcherHomes.has(a.launcher)) launcherHomes.set(a.launcher, await homeFromLauncherFile(a.launcher));
         const home = launcherHomes.get(a.launcher);
         if (!home) continue;
         const parts = home.split("/");
@@ -98,20 +109,11 @@ const plugin = definePlugin({
       return out;
     }
 
-    /** Instance Hermes de l'entreprise dans le dossier de travail : celle qui porte le nom de l'entreprise, sinon la seule, sinon la première. */
-    function companyInstance(ws: Workspace, list: HermesInstance[], companyName: string | null): HermesInstance | null {
-      const inWs = list.filter((i) => i.home.startsWith(ws.profils + "/"));
-      if (!inWs.length) return null;
-      const want = companyName ? slug(companyName) : "";
-      return inWs.find((i) => i.name === want) ?? inWs[0] ?? null;
-    }
-
-    /** Prépare le profil + dossiers d'un agent sans profil. Retourne la liste de ce qui a été créé, ou null si impossible. */
+    /** Prépare le profil + dossiers d'un agent sans profil, dans l'instance de l'entreprise (stricte). null = pas de dossier de travail. */
     async function prepare(a: AgentSnapshot, list: HermesInstance[], companyName: string | null): Promise<{ created: string[]; warnings: string[] } | null> {
       const ws = await readWorkspace();
       if (!ws || !(await exists(ws.profils))) return null;
       const inst = companyInstance(ws, list, companyName);
-      if (!inst) return null;
       const r = await prepareAgent({ ws, instanceHome: inst.home, agentName: a.agentName, title: a.title, binary: BINARY, entreprise: companyName });
       log.info("agent préparé", { agent: a.agentName, profile: `${inst.name}/${r.profile}`, created: r.created.length, warnings: r.warnings });
       return { created: r.created, warnings: r.warnings };
@@ -131,7 +133,7 @@ const plugin = definePlugin({
       return name;
     }
 
-    /** Paperclip → Hermes pour une liste d'agents ; prépare les agents sans profil ; mémorise le résultat par agent. */
+    /** Paperclip → Hermes pour une liste d'agents ; prépare les agents sans profil si demandé ; mémorise le résultat par agent. */
     async function syncAll(snap: AgentSnapshot[], list: HermesInstance[], opts: { companyId?: string; autoPrepare?: boolean } = {}): Promise<SyncRecord[]> {
       const previous = ((await ctx.state.get(SYNC_KEY)) as SyncRecord[] | null) ?? [];
       const records: SyncRecord[] = [];
@@ -139,7 +141,7 @@ const plugin = definePlugin({
       for (const a of snap) {
         let m = matchAgent(a.agentName, instancesList);
         const rec: SyncRecord = { agentId: a.agentId, agentName: a.agentName, instance: m?.instance.name ?? null, profile: m?.profile.name ?? null, home: m?.profile.home ?? null, want: a.want, cwd: a.cwd, changed: [], error: null, prepared: null, at: new Date().toISOString() };
-        if (!m && opts.autoPrepare !== false) {
+        if (!m && opts.autoPrepare === true) {
           try {
             const p = await prepare(a, instancesList, opts.companyId ? await companyName(opts.companyId) : null);
             if (p) {
@@ -157,12 +159,23 @@ const plugin = definePlugin({
         if (!m) {
           rec.error = rec.error ?? "aucun profil Hermes de ce nom";
         } else {
-          // carte agentId → profil, lue par l'adaptateur pour poser les liens de skills (listSkills / syncSkills n'ont que l'id)
-          await rememberAgent(a.agentId, { name: a.agentName, instance: m.instance.name, profile: m.profile.name, home: m.profile.home }).catch(() => {});
-          const r = await syncProfile(m.profile.home, a.want, BINARY);
-          rec.changed = r.changed;
-          rec.error = r.error;
-          if (r.changed.length) log.info("Hermes synchronisé", { agent: a.agentName, profile: `${m.instance.name}/${m.profile.name}`, changed: r.changed });
+          // carte agentId → profil (affectation) : lue par l'adaptateur avant tout passage et pour poser les liens de skills
+          try {
+            await rememberAgent(a.agentId, { name: a.agentName, instance: m.instance.name, profile: m.profile.name, home: m.profile.home });
+          } catch (e) {
+            rec.error = `carte des affectations : ${e instanceof Error ? e.message : String(e)}`;
+            log.warn("agents.json non écrit", { agent: a.agentName, error: String(e) });
+          }
+          if (m.profile.configError) {
+            // config.yaml présent mais illisible : aucune écriture, jamais de réécriture
+            rec.error = unreadableConfigError(m.profile.configError);
+            log.warn("profil non synchronisé", { agent: a.agentName, profile: `${m.instance.name}/${m.profile.name}`, error: rec.error });
+          } else {
+            const r = await syncProfile(m.profile.home, a.want, BINARY);
+            rec.changed = r.changed;
+            rec.error = r.error ?? rec.error;
+            if (r.changed.length) log.info("Hermes synchronisé", { agent: a.agentName, profile: `${m.instance.name}/${m.profile.name}`, changed: r.changed });
+          }
         }
         records.push(rec);
       }
@@ -173,17 +186,44 @@ const plugin = definePlugin({
       return merged;
     }
 
-    // ---- la seule donnée pour l'interface ----
+    /** Santé par profil (lecture seule) et état par agent (installé / connecté / autorisé). */
+    async function healthOf(list: HermesInstance[], sync: SyncRecord[]): Promise<{ health: Record<string, ProfileHealth>; states: Record<string, AgentState>; alerts: string[] }> {
+      const health: Record<string, ProfileHealth> = {};
+      const alerts: string[] = [];
+      for (const i of list) {
+        for (const p of i.profiles) {
+          health[p.home] = await checkProfile(p.home);
+          for (const a of health[p.home]!.alerts) alerts.push(`${i.name}/${p.name} : ${a}`);
+        }
+      }
+      const mapError = await agentsMapError();
+      if (mapError) alerts.push(mapError);
+      const states: Record<string, AgentState> = {};
+      for (const s of sync) {
+        const profile = list.find((i) => i.name === s.instance)?.profiles.find((p) => p.name === s.profile);
+        if (profile) states[s.agentId] = agentState(s, profile);
+      }
+      return { health, states, alerts };
+    }
+
+    healthProbe = async () => {
+      const snap = ((await ctx.state.get(SNAPSHOT_KEY)) as AgentSnapshot[] | null) ?? [];
+      const sync = ((await ctx.state.get(SYNC_KEY)) as SyncRecord[] | null) ?? [];
+      return (await healthOf(await instances(snap, true), sync)).alerts;
+    };
+
+    // ---- la seule donnée pour l'interface : lecture + synchro des agents déjà reliés ; ne prépare JAMAIS ----
     ctx.data.register("instances", async (params) => {
       const companyId = String(params["companyId"] ?? "");
       if (!companyId) throw new Error("companyId manquant");
       const snap = await snapshotAgents(companyId);
       const list = await instances(snap, false);
-      const sync = await syncAll(snap, list, { companyId });
+      const sync = await syncAll(snap, list, { companyId, autoPrepare: false });
       const ws = await readWorkspace();
       const telegram: Record<string, boolean> = {};
       for (const i of list) for (const p of i.profiles) telegram[p.home] = await telegramConfigured(p.home);
-      return { instances: (await instances(snap, true)), sync, workspace: ws, telegram };
+      const { health, states } = await healthOf(list, sync);
+      return { instances: await instances(snap, true), sync, workspace: ws, telegram, health, states };
     });
 
     // ---- actions de la page ----
@@ -197,7 +237,7 @@ const plugin = definePlugin({
       if (!a) throw new Error("agent Hermes introuvable dans cette entreprise");
       const list = await instances(snap, true);
       const p = await prepare(a, list, await companyName(companyId));
-      if (!p) throw new Error("pas de dossier de travail (~/.config/hermes-control/workspace) ou aucune instance Hermes dedans");
+      if (!p) throw new Error("pas de dossier de travail (~/.config/hermes-control/workspace) ou son dossier hermes/profils n'existe pas");
       await syncAll(snap, await instances(snap, true), { companyId, autoPrepare: false });
       return { created: p.created, warnings: p.warnings };
     });
@@ -210,6 +250,7 @@ const plugin = definePlugin({
       const snap = ((await ctx.state.get(SNAPSHOT_KEY)) as AgentSnapshot[] | null) ?? [];
       const known = (await instances(snap, true)).flatMap((i) => i.profiles.map((p) => p.home));
       if (!known.includes(home)) throw new Error("profil Hermes inconnu");
+      await assertGatewayFree(home, known); // une seule passerelle Telegram par machine
       const changed = await setTelegramToken(home, token);
       let gateway = "";
       try {
@@ -221,7 +262,7 @@ const plugin = definePlugin({
       return { changed, gateway };
     });
 
-    // ---- un agent modifié dans Paperclip → Hermes se synchronise ----
+    // ---- un agent créé ou modifié dans Paperclip → Hermes se synchronise, et prépare l'agent sans profil ----
     for (const type of ["agent.updated", "agent.created"] as const) {
       ctx.events.on(type, async (event) => {
         const companyId = String((event as { companyId?: string }).companyId ?? "");
@@ -229,7 +270,7 @@ const plugin = definePlugin({
         try {
           const snap = await snapshotAgents(companyId);
           const list = await instances(snap, true);
-          await syncAll(snap, list, { companyId });
+          await syncAll(snap, list, { companyId, autoPrepare: true });
         } catch (e) {
           log.warn("synchronisation après événement impossible", { type, error: String(e) });
         }
@@ -248,7 +289,14 @@ const plugin = definePlugin({
   },
 
   async onHealth() {
-    return { status: "ok" as const, message: "Hermes Control" };
+    if (!healthProbe) return { status: "ok" as const, message: "Hermes Control" };
+    try {
+      const alerts = await healthProbe();
+      if (!alerts.length) return { status: "ok" as const, message: "Hermes Control" };
+      return { status: "degraded" as const, message: `Hermes Control : ${alerts.length} alerte(s) — ${alerts[0]}`, details: { alerts } };
+    } catch (e) {
+      return { status: "degraded" as const, message: `Hermes Control : sonde de santé en échec (${e instanceof Error ? e.message : String(e)})` };
+    }
   },
 });
 

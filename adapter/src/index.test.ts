@@ -48,19 +48,52 @@ describe("adaptateur Hermes Control", () => {
     expect(provider.default).toBe("openai-codex");
   });
 
-  it("détecte le modèle par défaut de Hermes", async () => {
+  it("detectModel ne devine plus à partir du premier profil venu : celui de l'adaptateur de base (null sans ~/.hermes)", async () => {
     const a = createServerAdapter();
-    const d = await a.detectModel!();
-    expect(d?.model).toBe("gpt-5.6-luna");
-    expect(d?.provider).toBe("openai-codex");
+    expect(await a.detectModel!()).toBeNull();
   });
 
-  it("refuse un agent sans profil correspondant, avec un message utile", async () => {
-    const a = createServerAdapter();
+  function withSpy() {
+    const calls: Record<string, unknown>[] = [];
+    const real = createServerAdapter();
+    const base = { ...real, execute: async (ctx: { config?: Record<string, unknown> }) => { calls.push(ctx.config ?? {}); return { status: "completed" } as never; } } as unknown as Parameters<typeof createServerAdapter>[0];
+    return { a: createServerAdapter(base), calls };
+  }
+  const ctxFor = (id: string, name: string, logs: string[], config: Record<string, unknown> = {}) => ({ runId: "r", agent: { id, companyId: "c", name, adapterType: "hermes_local", adapterConfig: {} }, runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null }, config, onLog: async (_s: string, t: string) => { logs.push(t); } }) as never;
+
+  it("R02b : un agent sans affectation dans agents.json refuse de tourner (base.execute jamais appelé), même si un profil porte son nom", async () => {
+    const { a, calls } = withSpy();
     const logs: string[] = [];
-    const ctx = { runId: "r", agent: { id: "x", companyId: "c", name: "Inconnu", adapterType: "hermes_local", adapterConfig: {} }, runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null }, config: {}, onLog: async (_s: string, t: string) => { logs.push(t); } };
-    await expect(a.execute(ctx as never)).rejects.toThrow(/Inconnu/);
-    expect(logs.join("")).toContain("marketing/apolline-m");
+    await expect(a.execute(ctxFor("x", "Apolline M", logs))).rejects.toThrow(/non affecté.*prépare l'agent dans Paperclip/);
+    expect(calls).toEqual([]);
+    expect(logs.join("")).toContain("agents.json");
+  });
+
+  it("affecté mais le profil n'a plus de config.yaml → refus ; affecté et présent → HERMES_HOME du profil affecté", async () => {
+    const { a, calls } = withSpy();
+    await rememberAgent("gone", { name: "Parti", instance: "marketing", profile: "parti", home: join(root, "marketing", "profiles", "parti") });
+    await expect(a.execute(ctxFor("gone", "Parti", []))).rejects.toThrow(/config.yaml n'existe plus/);
+    expect(calls).toEqual([]);
+    const home = join(root, "marketing", "profiles", "apolline-m");
+    await rememberAgent("ok", { name: "Apolline M", instance: "marketing", profile: "apolline-m", home });
+    const logs: string[] = [];
+    await a.execute(ctxFor("ok", "Apolline M", logs));
+    expect(calls).toHaveLength(1);
+    expect((calls[0]!["env"] as Record<string, string>)["HERMES_HOME"]).toBe(home);
+    expect(logs.join("")).toContain("affectation agents.json");
+  });
+
+  it("HERMES_CONTROL_HERMES_BIN est pris avant ~/.local/bin/hermes pour hermesCommand", async () => {
+    const { a, calls } = withSpy();
+    const home = join(root, "marketing", "profiles", "apolline-m");
+    await rememberAgent("ok", { name: "Apolline M", instance: "marketing", profile: "apolline-m", home });
+    process.env["HERMES_CONTROL_HERMES_BIN"] = join(root, "mon-hermes");
+    try {
+      await a.execute(ctxFor("ok", "Apolline M", []));
+    } finally {
+      delete process.env["HERMES_CONTROL_HERMES_BIN"];
+    }
+    expect(calls[0]!["hermesCommand"]).toBe(join(root, "mon-hermes"));
   });
 
   it("listSkills / syncSkills : profil inconnu → avertissement ; profil connu → lien dans <profil>/skills", async () => {
