@@ -43,6 +43,11 @@ Tested with Hermes 0.19 and 0.21.5, on Paperclip 2026.1001.0 (plugin SDK `@paper
 - The **instances view has no side effects**: opening it never creates a profile, folders or links; only `agent.created` / `agent.updated` and the « Préparer l'agent » button do.
 - A **single Telegram gateway** guard: a token is refused when another profile on the machine already runs the gateway (Hermes installs one `hermes-gateway.service` per user).
 - A `doctor` check that verifies the plugin's **`localPath`** registration in Paperclip (a locally installed plugin breaks silently when its folder moves) and the YAML front matter of the skills.
+- **R02b — one model account per explicitly assigned instance**: an agent gets an instance only by an explicit decision of the operator; the assignment is checked before any wake; `doctor` lists which agent uses which account. An empty `.env` (R02a, first bullet) does not remove the instance's OAuth login, hence this second rule.
+- The instances view **never runs the agent's `hermesCommand`** to resolve its home (`resolveHomeFromLauncher`): it reads `agents.json` and the profile files only.
+- **`agents.json` writes under a lock** (the adapter at run time and the plugin's sync may write at the same time).
+- `doctor` reports **three states per agent: installed / connected / authorized and tested** (a profile prepared but not connected is *installed*, not green).
+- `doctor` **measures the real full socket path length** of each profile (Unix socket limit 108 bytes, target under 100) and refuses too-deep roots (seen on CDjam: "AF_UNIX path too long" on the gateway watchdog probe).
 
 ## Security note
 

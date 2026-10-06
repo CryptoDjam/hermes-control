@@ -8,6 +8,11 @@ Planned, not released. Tested target: Hermes 0.19 and 0.21.5.
 - **Instances view without side effects**: opening the Hermes page never creates a profile, folders or links any more; only `agent.created` / `agent.updated` and the « Préparer l'agent » button prepare an agent.
 - **Single Telegram gateway guard**: a token is refused when another profile on the machine already runs the gateway (one `hermes-gateway.service` per user).
 - **`doctor`**: checks the plugin's `localPath` registration in Paperclip (a locally installed plugin breaks silently when its folder moves) and the YAML front matter of the skills.
+- **R02b — one model account per explicitly assigned instance**: an agent gets an instance only by an explicit decision of the operator; the assignment is checked before any wake; `doctor` lists which agent uses which account. An empty `.env` (R02a) does not remove the instance's OAuth login, hence this rule.
+- **Instances view never runs the agent's `hermesCommand`** to resolve its home (`resolveHomeFromLauncher`): it reads `agents.json` and the profile files only.
+- **`agents.json` writes under a lock** (adapter at run time and plugin sync may write together).
+- **`doctor` reports three states per agent**: installed / connected / authorized and tested (prepared but not connected = installed, not green).
+- **`doctor` measures the real full socket path length** of each profile (Unix socket limit 108 bytes, target under 100) and refuses too-deep roots.
 - Note for operators: agents whose task may need a confirmation must be woken by issue assignment, never by `POST /agents/:id/wakeup` (Paperclip issue #13704), otherwise the continuation fails with `continuation_source_context_missing`.
 - 44 tests today (29 plugin + 15 adapter).
 
