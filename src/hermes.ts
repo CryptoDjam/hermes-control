@@ -1,12 +1,13 @@
 // Lecture des instances Hermes directement depuis leurs fichiers (fiable, sans réseau),
-// et exécution contrôlée du CLI hermes (sans shell, arguments séparés).
+// et exécution contrôlée du CLI hermes (sans shell, arguments séparés, binaire administré, environnement explicite).
+// Aucun script lanceur n'est lu ni exécuté (0.6.1).
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, realpath, stat, readdir, access } from "node:fs/promises";
+import { readFile, stat, readdir, access } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { homedir } from "node:os";
 import YAML from "yaml";
+import { accountHome } from "./paths.js";
 
 const run = promisify(execFile);
 
@@ -26,7 +27,7 @@ export interface HermesProfile {
 export interface HermesInstance {
   name: string;
   home: string;
-  launcher: string | null; // hermesCommand de Paperclip ayant mené à cette instance
+  launcher: string | null; // toujours null depuis 0.6.1 (les lanceurs ne servent plus à découvrir les instances)
   dashboardUrl: string | null;
   profiles: HermesProfile[];
   errors24h: number;
@@ -66,118 +67,45 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-/** Exécute `hermes <args>` pour un HERMES_HOME donné (jamais via un shell). */
-export async function hermes(home: string, args: string[], binary = "hermes", timeoutMs = 20_000): Promise<string> {
-  const { stdout } = await run(binary, args, {
-    env: { ...process.env, HERMES_HOME: home, PYTHONUNBUFFERED: "1", NO_COLOR: "1" },
+/**
+ * Exécutable Hermes VÉRIFIÉ (voir binary.ts : verifyHermesBinary) : chemin absolu administré + dossier de l'interpréteur à
+ * placer en tête de PATH. Une chaîne est acceptée pour les appels de bas niveau et les tests : c'est alors l'appelant qui
+ * garantit qu'elle a été vérifiée. `null` = aucun binaire administré : aucun appel possible.
+ */
+export interface HermesExec {
+  path: string;
+  pathPrefix: string[];
+}
+export type HermesBin = HermesExec | string | null;
+
+export function toExec(bin: HermesBin): HermesExec | null {
+  if (bin === null) return null;
+  if (typeof bin === "string") return isAbsolute(bin) ? { path: bin, pathPrefix: [dirname(bin)] } : null;
+  return bin;
+}
+
+/** Environnement EXPLICITE d'un appel Hermes du plugin : rien n'est hérité au-delà de PATH (après le dossier de l'interpréteur) et de la langue. */
+export function hermesCallEnv(home: string, exec: HermesExec): Record<string, string> {
+  const path: string[] = [];
+  for (const d of [...exec.pathPrefix, ...(process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin").split(":")]) if (d && isAbsolute(d) && !path.includes(d)) path.push(d);
+  const env: Record<string, string> = { PATH: path.join(":"), HOME: accountHome(), HERMES_HOME: home, PYTHONUNBUFFERED: "1", NO_COLOR: "1" };
+  for (const k of ["LANG", "LC_ALL", "TZ", "USER", "LOGNAME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) {
+    const v = process.env[k];
+    if (v) env[k] = v;
+  }
+  return env;
+}
+
+/** Exécute `<binaire administré> <args>` pour un HERMES_HOME donné (jamais via un shell, jamais un nom cherché dans le PATH). */
+export async function hermes(home: string, args: string[], binary: HermesBin, timeoutMs = 20_000): Promise<string> {
+  const exec = toExec(binary);
+  if (!exec) throw new Error(`aucun binaire Hermes administré (chemin absolu vérifié) : appel « hermes ${args.slice(0, 2).join(" ")} » refusé`);
+  const { stdout } = await run(exec.path, args, {
+    env: hermesCallEnv(home, exec),
     timeout: timeoutMs,
     maxBuffer: 4 * 1024 * 1024,
   });
   return stdout;
-}
-
-/**
- * @deprecated Exécute le lanceur (`<lanceur> config path`) : la vue ne doit rien exécuter. Préférer homeFromLauncherFile.
- * Retrouve le HERMES_HOME derrière un lanceur (hermesCommand) : `<lanceur> config path` → …/config.yaml
- */
-export async function resolveHomeFromLauncher(launcher: string): Promise<string | null> {
-  const path = resolve(launcher);
-  if (!(await exists(path))) return null;
-  try {
-    const { stdout } = await run(path, ["config", "path"], { timeout: 20_000, env: { ...process.env, NO_COLOR: "1" } });
-    const line = stdout.trim().split("\n").filter(Boolean).pop() ?? "";
-    if (!line.endsWith("config.yaml")) return null;
-    return dirname(line);
-  } catch {
-    return null;
-  }
-}
-
-const LAUNCHER_MAX_BYTES = 64 * 1024;
-const ASSIGN_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
-
-/**
- * Valeur d'une affectation shell : apostrophes = littéral (mais une apostrophe qui contient `$` n'est pas résoluble
- * → null) ; guillemets = expansion ; sans guillemets, un mot suivi d'autres mots est une commande préfixée
- * (`HERMES_HOME=/x exec …`) → "ignore" (la ligne ne compte pas).
- */
-function literalValue(raw: string): { value: string; quoted: "single" | "double" | null } | "ignore" | null {
-  const t = raw.trim();
-  const sq = /^'([^']*)'(?:\s*(#.*)?)?$/.exec(t);
-  if (sq) return sq[1]!.includes("$") ? null : { value: sq[1]!, quoted: "single" };
-  const dq = /^"([^"]*)"(?:\s*(#.*)?)?$/.exec(t);
-  if (dq) return { value: dq[1]!, quoted: "double" };
-  if (/^["']/.test(t)) return null; // guillemet ouvert, non fermé sur la ligne
-  const word = t.split(/\s+#/)[0]!.trim();
-  if (/\s/.test(word)) return "ignore"; // `VAR=x commande …`
-  return { value: word, quoted: null };
-}
-
-/** Remplace $VAR / ${VAR} / ~ par les valeurs connues ; null si une variable reste inconnue ou si la valeur n'est pas littérale. */
-function expand(value: string, vars: Record<string, string>): string | null {
-  if (/\$\(|`|\$\{[A-Za-z_][A-Za-z0-9_]*[:#%/]/.test(value)) return null; // sous-shell ou expansion conditionnelle : pas littéral
-  let missing = false;
-  let out = value.replace(/^~(?=\/|$)/, vars["HOME"] ?? "~");
-  out = out.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_, a: string | undefined, b: string | undefined) => {
-    const v = vars[(a ?? b)!];
-    if (v === undefined) missing = true;
-    return v ?? "";
-  });
-  return missing ? null : out;
-}
-
-/**
- * `home` : chemin réel (realpath) pour comparer avec l'affectation ; `literal` : HERMES_HOME tel qu'écrit dans le lanceur,
- * après expansion des variables mais SANS realpath — c'est ce chemin que Hermes reçoit et sur lequel il lie ses sockets
- * (un lien court `~/.h/d` vers une racine profonde garde des sockets courts).
- */
-export type LauncherHome = { home: string; literal: string; error: null } | { home: null; literal: null; error: string };
-
-const launcherError = (error: string): LauncherHome => ({ home: null, literal: null, error });
-
-/**
- * HERMES_HOME d'un lanceur (hermesCommand) par lecture STATIQUE du script, sans l'exécuter : ligne `HERMES_HOME=…`,
- * avec $HOME / ~ → homedir, $PROJETC → <dossier du lanceur>/../.. (nos lanceurs le calculent ainsi) et toute variable
- * affectée littéralement plus haut dans le fichier. Toute incertitude est une ERREUR explicite, jamais une conformité :
- * lanceur relatif, absent, trop gros ou binaire ; aucun HERMES_HOME ; valeur non résolue (variable inconnue, sous-shell,
- * expansion conditionnelle) ; PLUSIEURS affectations de HERMES_HOME (le shell appliquerait la dernière : refus).
- */
-export async function homeFromLauncherFile(launcher: string): Promise<LauncherHome> {
-  if (!isAbsolute(launcher)) return launcherError(`lanceur relatif (${launcher}) : dépend du cwd de Paperclip`);
-  let path = resolve(launcher);
-  try {
-    path = await realpath(path); // les lanceurs font `readlink -f "$0"`
-    const st = await stat(path);
-    if (!st.isFile()) return launcherError(`lanceur ${path} : pas un fichier`);
-    if (st.size > LAUNCHER_MAX_BYTES) return launcherError(`lanceur ${path} : trop gros pour une lecture statique (${st.size} octets)`);
-  } catch (e) {
-    return launcherError(`lanceur ${launcher} illisible : ${(e as Error).message}`);
-  }
-  let text: string;
-  try {
-    text = await readFile(path, "utf8");
-  } catch (e) {
-    return launcherError(`lanceur ${path} illisible : ${(e as Error).message}`);
-  }
-  if (text.includes("\0")) return launcherError(`lanceur ${path} : fichier binaire, HERMES_HOME non lisible`);
-  const vars: Record<string, string> = { HOME: homedir(), PROJETC: resolve(dirname(path), "..", "..") };
-  const homes: { line: number; value: string | null }[] = [];
-  text.split("\n").forEach((line, i) => {
-    const m = ASSIGN_RE.exec(line);
-    if (!m) return;
-    const [, name, raw] = m as unknown as [string, string, string];
-    const lit = literalValue(raw);
-    if (lit === "ignore") return;
-    const value = lit === null ? null : lit.quoted === "single" ? lit.value : expand(lit.value, vars);
-    if (name === "HERMES_HOME") homes.push({ line: i + 1, value: value && value.startsWith("/") ? value : null });
-    else if (value !== null) vars[name] = value;
-  });
-  if (!homes.length) return launcherError(`lanceur ${path} : aucune affectation HERMES_HOME lisible`);
-  if (homes.length > 1) return launcherError(`lanceur ${path} : plusieurs HERMES_HOME (lignes ${homes.map((h) => h.line).join(", ")}) ; le shell appliquerait la dernière — refus`);
-  const only = homes[0]!;
-  if (!only.value) return launcherError(`lanceur ${path} : HERMES_HOME non résolu (ligne ${only.line} : variable inconnue, sous-shell ou valeur non littérale)`);
-  const literal = resolve(only.value); // normalisé (., .., //) mais liens NON suivis
-  return { home: (await realpath(literal).catch(() => null)) ?? literal, literal, error: null }; // chemin réel quand le dossier existe
 }
 
 export function parseConfig(text: string): Record<string, unknown> {
@@ -239,8 +167,8 @@ export function parseAuthStatus(text: string): HermesProfile["authStatus"] {
   return "unknown";
 }
 
-async function readAuth(home: string, provider: string | null, binary: string): Promise<HermesProfile["authStatus"]> {
-  if (!provider || provider === "auto") return "unknown";
+async function readAuth(home: string, provider: string | null, binary: HermesBin): Promise<HermesProfile["authStatus"]> {
+  if (!provider || provider === "auto" || !toExec(binary)) return "unknown";
   try {
     return parseAuthStatus(await hermes(home, ["auth", "status", provider], binary));
   } catch (e) {
@@ -248,7 +176,7 @@ async function readAuth(home: string, provider: string | null, binary: string): 
   }
 }
 
-async function readProfile(name: string, home: string, binary: string, light = false): Promise<HermesProfile> {
+async function readProfile(name: string, home: string, binary: HermesBin, light = false): Promise<HermesProfile> {
   const { cfg, error: configError } = await readConfigStrict(home);
   const model = pick(cfg, ["model", "default"]);
   const provider = pick(cfg, ["model", "provider"]);
@@ -269,7 +197,7 @@ async function readProfile(name: string, home: string, binary: string, light = f
 }
 
 /** Lit l'instance (racine = profil « default ») et ses profils (`profiles/<nom>/`). */
-export async function readInstance(name: string, home: string, launcher: string | null, binary: string, dashboardUrl: string | null, opts: { light?: boolean } = {}): Promise<HermesInstance> {
+export async function readInstance(name: string, home: string, launcher: string | null, binary: HermesBin, dashboardUrl: string | null, opts: { light?: boolean } = {}): Promise<HermesInstance> {
   const light = opts.light === true;
   const profiles: HermesProfile[] = [await readProfile("default", home, binary, light)];
   const dir = join(home, "profiles");
@@ -382,8 +310,8 @@ export function instanceNameFromHome(home: string): string {
  */
 export async function detectDashboards(): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
-  // Paperclip lance le worker sans HOME : homedir() lit /etc/passwd en secours.
-  const dir = join(homedir(), ".config", "systemd", "user");
+  // dossier du compte (getpwuid) : Paperclip lance le worker sans HOME
+  const dir = join(accountHome(), ".config", "systemd", "user");
   let files: string[] = [];
   try {
     files = (await readdir(dir)).filter((f) => f.startsWith("hermes-dashboard-") && f.endsWith(".service"));
@@ -428,21 +356,21 @@ export function profileHome(instanceHome: string, profile: string): string {
 
 // ---- commandes Hermes exposées à Paperclip (toutes sans shell, arguments séparés) ----
 
-export async function profileCreate(instanceHome: string, name: string, description: string | null, binary: string, opts: { clone?: boolean } = {}): Promise<string> {
+export async function profileCreate(instanceHome: string, name: string, description: string | null, binary: HermesBin, opts: { clone?: boolean } = {}): Promise<string> {
   const args = ["profile", "create", assertSafeName(name), "--no-alias"];
   if (opts.clone) args.push("--clone");
   if (description) args.push("--description", description.slice(0, 500));
   return hermes(instanceHome, args, binary, 120_000);
 }
 
-export async function profileDescribe(instanceHome: string, name: string, text: string, binary: string): Promise<string> {
+export async function profileDescribe(instanceHome: string, name: string, text: string, binary: HermesBin): Promise<string> {
   const args = ["profile", "describe", assertSafeName(name), "--text", text.slice(0, 500)];
   return hermes(instanceHome, args, binary);
 }
 
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,120}$/;
 
-export async function setModel(home: string, model: string, provider: string | null, binary: string): Promise<string> {
+export async function setModel(home: string, model: string, provider: string | null, binary: HermesBin): Promise<string> {
   if (!MODEL_RE.test(model)) throw new Error(`nom de modèle invalide : ${model}`);
   if (provider && !/^[a-z0-9-]{1,40}$/.test(provider)) throw new Error(`fournisseur invalide : ${provider}`);
   let out = await hermes(home, ["config", "set", "model.default", model, "--force"], binary);
@@ -450,7 +378,7 @@ export async function setModel(home: string, model: string, provider: string | n
   return out;
 }
 
-export async function authStatus(home: string, provider: string | null, binary: string): Promise<string> {
+export async function authStatus(home: string, provider: string | null, binary: HermesBin): Promise<string> {
   const args = ["auth", "status"];
   if (provider) args.push(provider);
   try {
@@ -460,7 +388,7 @@ export async function authStatus(home: string, provider: string | null, binary: 
   }
 }
 
-export async function doctor(home: string, binary: string): Promise<string> {
+export async function doctor(home: string, binary: HermesBin): Promise<string> {
   try {
     return await hermes(home, ["doctor"], binary, 120_000);
   } catch (e) {

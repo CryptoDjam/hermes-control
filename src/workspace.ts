@@ -3,7 +3,7 @@
 //   <ws>/hermes/skills/<skill>                   skills communs, liés dans chaque profil
 //   <ws>/modeles/{SOUL.md,MEMORY.md,USER.md,fiche.md,config.yaml,instructions.md}   gabarits
 //   <ws>/agents/<agent>/{fiche.md,rapports,memoire,medias/{brouillons,valides,publies},journal}
-// Le chemin est noté dans ~/.config/hermes-control/workspace (une ligne). Sans ce fichier : rien d'automatique.
+// Le chemin est noté dans <référence>/workspace (une ligne ; aucune variable d'environnement). Sans ce fichier : rien d'automatique.
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -27,8 +27,6 @@ export function layout(root: string): Workspace {
 }
 
 export async function readWorkspace(): Promise<Workspace | null> {
-  const fromEnv = process.env["HERMES_CONTROL_WORKSPACE"];
-  if (fromEnv && fromEnv.trim()) return layout(fromEnv.trim());
   try {
     const line = (await readFile(workspaceFile(), "utf8")).split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#"));
     return line ? layout(line.replace(/^~(?=\/|$)/, userHome())) : null;

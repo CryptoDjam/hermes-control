@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { lstat, mkdir, mkdtemp, readFile, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { assignAgent, assignmentsFile, canonicalInstance, emptyTable, isApprovedBinary, knownRoots, parseTable, readAssignments, relationalIssues, replaceTable, resolveAssignment, setCompanyInstances, sha256, unassignAgent } from "./assignments.js";
+import { assignAgent, assignmentsFile, canonicalInstance, emptyTable, knownRoots, parseTable, readAssignments, relationalIssues, replaceTable, resolveAssignment, setCompanyInstances, setExecutionRoot, sha256, unassignAgent } from "./assignments.js";
+import { writeRoots } from "./testkit.js";
 import { agentsMapFile, readProjection } from "./agents-map.js";
 import { ownerFile } from "./lock.js";
 
@@ -21,19 +22,18 @@ beforeEach(async () => {
     await writeFile(join(i, "config.yaml"), "model: {}\n");
     await writeFile(join(i, "profiles", "assistant", "config.yaml"), "model: {}\n");
   }
-  process.env["HERMES_CONTROL_ROOTS"] = join(root, "instances");
+  await writeRoots(join(root, "instances"));
 });
 afterEach(() => {
-  delete process.env["HERMES_CONTROL_ROOTS"];
   if (savedHome) process.env["HOME"] = savedHome;
 });
 
 describe("table assignments.json : fichier, schéma, racines", () => {
-  it("chemin : ~/.config/hermes-control/assignments.json, ou HERMES_CONTROL_ASSIGNMENTS ; absente → table vide, exists faux", async () => {
+  it("chemin : <compte>/.config/hermes-control/assignments.json ; HERMES_CONTROL_ASSIGNMENTS n'est plus lue ; absente → table vide, exists faux", async () => {
     expect(assignmentsFile()).toBe(join(root, ".config", "hermes-control", "assignments.json"));
     process.env["HERMES_CONTROL_ASSIGNMENTS"] = join(root, "x", "t.json");
     try {
-      expect(assignmentsFile()).toBe(join(root, "x", "t.json"));
+      expect(assignmentsFile()).toBe(join(root, ".config", "hermes-control", "assignments.json"));
     } finally {
       delete process.env["HERMES_CONTROL_ASSIGNMENTS"];
     }
@@ -43,15 +43,20 @@ describe("table assignments.json : fichier, schéma, racines", () => {
     expect(r.table).toEqual(emptyTable());
   });
 
-  it("parseTable refuse tout écart de schéma ; accepte approvedBinaries", () => {
+  it("parseTable refuse tout écart de schéma ; refuse approvedBinaries (0.6.0) ; accepte hermes et instances", () => {
     expect(parseTable(null).error).toMatch(/pas un objet/);
     expect(parseTable({ schemaVersion: 2 }).error).toMatch(/schemaVersion/);
     expect(parseTable({ schemaVersion: 1, companies: [] }).error).toMatch(/companies/);
     expect(parseTable({ schemaVersion: 1, companies: { c: { name: "x", instances: ["rel/path"] } } }).error).toMatch(/non absolu/);
     expect(parseTable({ schemaVersion: 1, agents: { a: { companyId: "c" } } }).error).toMatch(/agents\[a\]\.instanceHome manquant/);
-    const ok = parseTable({ schemaVersion: 1, companies: {}, agents: {}, approvedBinaries: ["/usr/bin/hermes"] });
+    expect(parseTable({ schemaVersion: 1, companies: {}, agents: {}, approvedBinaries: ["/usr/bin/hermes"] }).error).toMatch(/approvedBinaries.*n'existe plus/);
+    expect(parseTable({ schemaVersion: 1, hermes: { binary: "hermes" } }).error).toMatch(/hermes\.binary doit être un chemin absolu/);
+    expect(parseTable({ schemaVersion: 1, hermes: { binary: "/x/hermes", sha256: "zz" } }).error).toMatch(/sha256/);
+    expect(parseTable({ schemaVersion: 1, instances: { "rel/x": {} } }).error).toMatch(/clé non absolue/);
+    const ok = parseTable({ schemaVersion: 1, hermes: { binary: "/opt/h/bin/hermes", linkTarget: "/opt/h/real" }, instances: { "/i/a": { executionRoot: "~/.h/a", hermes: { binary: "/opt/h2/hermes" } } }, companies: {}, agents: {} });
     expect(ok.error).toBeNull();
-    expect(ok.table?.approvedBinaries).toEqual(["/usr/bin/hermes"]);
+    expect(ok.table?.hermes).toEqual({ binary: "/opt/h/bin/hermes", linkTarget: "/opt/h/real" });
+    expect(ok.table?.instances?.["/i/a"]).toEqual({ executionRoot: "~/.h/a", hermes: { binary: "/opt/h2/hermes" } });
   });
 
   it("fichier corrompu → error, table refusée, fichier intact ; une écriture est refusée", async () => {
@@ -153,7 +158,7 @@ describe("écritures : set-company-instances, assign, unassign — validées, at
     // une écriture qui ne crée pas de NOUVEAU problème passe (les anciens restent signalés) ; une qui en crée un est refusée
     await assignAgent({ agentId: "new", companyId: "A", instanceHome: instA, profile: "autre", name: "N", assignedBy: "u" });
     await expect(replaceTable(table as never)).rejects.toThrow(/table refusée/);
-    expect(await relationalIssues(emptyTable(), [])).toEqual({ companies: {}, agents: {} });
+    expect(await relationalIssues(emptyTable(), [])).toEqual({ companies: {}, agents: {}, instances: {} });
   });
 });
 
@@ -167,7 +172,39 @@ describe("résolution (plugin et adaptateur)", () => {
     const ok = await resolveAssignment("a1", { companyId: "A" });
     expect(ok.ok?.home).toBe(join(instA, "profiles", "assistant"));
     expect(ok.ok?.source).toBe("table");
-    expect(ok.approvedBinaries).toEqual([]);
+    expect(ok.ok?.execution).toEqual({ root: instA, home: join(instA, "profiles", "assistant") }); // sans racine d'exécution : la canonique
+    expect(ok.ok?.hermes).toBeNull(); // aucun binaire administré
+  });
+
+  it("racine d'exécution courte : même instance (realpath) acceptée et conservée LITTÉRALEMENT ; alias vers une autre instance refusé ; « . », « .. », relatif refusés ; ~/ développé depuis le compte", async () => {
+    await setCompanyInstances("A", "Societe A", [instA]);
+    await assignAgent({ agentId: "a1", companyId: "A", instanceHome: instA, profile: "assistant", name: "Assistant", assignedBy: "u" });
+    await assignAgent({ agentId: "a0", companyId: "A", instanceHome: instA, profile: "default", name: "Racine", assignedBy: "u" });
+    await mkdir(join(root, ".h"), { recursive: true });
+    await symlink(instA, join(root, ".h", "a"));
+    await symlink(instB, join(root, ".h", "b"));
+    await setExecutionRoot(instA, "~/.h/a");
+    const t = await readAssignments();
+    expect(t.table.instances?.[instA]).toEqual({ executionRoot: "~/.h/a" });
+    const r = await resolveAssignment("a1");
+    expect(r.ok?.execution).toEqual({ root: join(root, ".h", "a"), home: join(root, ".h", "a", "profiles", "assistant") }); // chaîne courte transmise, pas le realpath
+    expect(r.ok?.home).toBe(join(instA, "profiles", "assistant")); // canonique pour les vérifications
+    expect((await resolveAssignment("a0")).ok?.execution.home).toBe(join(root, ".h", "a")); // profil default = la racine elle-même
+    expect((await readProjection()).projection?.agents["a1"]?.home).toBe(join(root, ".h", "a", "profiles", "assistant"));
+    await expect(setExecutionRoot(instA, join(root, ".h", "b"))).rejects.toThrow(/désigne .*societe-b, pas l'instance/);
+    await expect(setExecutionRoot(instA, `${root}/.h/a/../a`)).rejects.toThrow(/« \. » ou « \.\. » interdit/);
+    await expect(setExecutionRoot(instA, ".h/a")).rejects.toThrow(/non absolu/);
+    // écrite à la main vers une autre instance : l'instance ET ses agents sont refusés à la lecture
+    const raw = JSON.parse(await readFile(assignmentsFile(), "utf8"));
+    raw.instances[instA].executionRoot = join(root, ".h", "b");
+    await writeFile(assignmentsFile(), JSON.stringify(raw));
+    const bad = await readAssignments();
+    expect(bad.issues.instances[instA]).toMatch(/désigne .*societe-b/);
+    expect((await resolveAssignment("a1")).reason).toMatch(/affectation invalide.*racine d'exécution/);
+    // clé non canonique (un lien) : refusée
+    raw.instances = { [join(root, ".h", "a")]: { executionRoot: join(root, ".h", "a") } };
+    await writeFile(assignmentsFile(), JSON.stringify(raw));
+    expect((await readAssignments()).issues.instances[join(root, ".h", "a")]).toMatch(/clé doit être la racine canonique/);
   });
 
   it("projection de secours : utilisée seulement si la table présente est illisible pour ce lecteur ET que l'empreinte est identique ; sinon refus", async () => {
@@ -194,20 +231,6 @@ describe("résolution (plugin et adaptateur)", () => {
     await rm(assignmentsFile());
     await writeFile(agentsMapFile(), JSON.stringify({ a1: { name: "Assistant", home: join(instA, "profiles", "assistant"), instance: "societe-a", profile: "assistant", at: "x" } }));
     expect((await resolveAssignment("a1")).reason).toMatch(/non affecté/);
-  });
-
-  it("isApprovedBinary : nom nu, HERMES_CONTROL_HERMES_BIN ou approvedBinaries ; un chemin de script non", () => {
-    expect(isApprovedBinary("hermes", {})).toBe(true);
-    expect(isApprovedBinary("/opt/hermes/bin/hermes", {})).toBe(false);
-    expect(isApprovedBinary("/opt/hermes/bin/hermes", { approvedBinaries: ["/opt/hermes/bin/hermes"] })).toBe(true);
-    process.env["HERMES_CONTROL_HERMES_BIN"] = "/usr/local/bin/hermes";
-    try {
-      expect(isApprovedBinary("/usr/local/bin/hermes", {})).toBe(true);
-      expect(isApprovedBinary("/usr/local/bin/hermes-x", {})).toBe(false);
-    } finally {
-      delete process.env["HERMES_CONTROL_HERMES_BIN"];
-    }
-    expect(isApprovedBinary("", {})).toBe(false);
   });
 
   it("verrou de la table : abandonné (owner.json périmé, pid mort) → repris ; détenteur vivant → « verrou tenu »", async () => {

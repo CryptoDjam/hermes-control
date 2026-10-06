@@ -1,25 +1,33 @@
-// Worker du plugin Hermes Control (v0.6). Paperclip est le maître, l'affectation est EXPLICITE :
+// Worker du plugin Hermes Control (v0.6.1). Paperclip est le maître, l'affectation est EXPLICITE :
 //  - l'affectation d'un agent = son entrée dans la table assignments.json (companyId, agentId → instance autorisée / profil),
 //    écrite seulement par les actions d'administration (assign-agent, unassign-agent, set-company-instances, prepare-agent) ;
 //    JAMAIS par le nom : ni à l'ouverture de la vue, ni à la synchro, ni à un renommage. Le nom ne sert qu'à une SUGGESTION
 //    affichée (restreinte aux instances autorisées de l'entreprise), jamais appliquée ;
 //  - pour un agent affecté, provider / modèle / thinking choisis dans le menu de l'agent sont écrits dans le config.yaml de
 //    son profil (`hermes config set`, sans shell) ; un agent non affecté → « non affecté », aucune écriture dans Hermes ;
-//  - la vue ne crée ni profil, ni dossier, ni lien, n'exécute aucun lanceur (lecture statique) et n'écrit jamais la table ;
-//  - un config.yaml, une table ou une projection corrompus → refus, jamais de réécriture ;
-//  - une seule donnée exposée à l'interface : « instances » ; actions : assign-agent, unassign-agent, set-company-instances,
-//    prepare-agent (instance explicite, affecte en même temps), set-telegram.
+//  - la vue ne crée ni profil, ni dossier, ni lien, ne lit ni n'exécute aucun lanceur et n'écrit jamais la table ;
+//    le `hermesCommand` d'un agent n'est plus utilisé (0.6.1) : il est seulement montré comme « ignoré » ;
+//  - tout appel à Hermes du plugin passe par le binaire ADMINISTRÉ dans la table, vérifié avant l'appel, avec un
+//    environnement explicite ; sans binaire administré valide, rien n'est exécuté ;
+//  - la référence (table, roots, workspace, projection) est la même que celle de l'adaptateur : <compte>/.config/hermes-control
+//    (src/paths.ts), sans variable d'environnement ; son chemin et ses empreintes sont exposés (santé, vue) ;
+//  - un config.yaml, une table ou une projection corrompus (ou HYBRIDE) → refus / signalement, jamais de réécriture ;
+//  - une seule donnée exposée à l'interface : « instances », FILTRÉE PAR ENTREPRISE (instances autorisées pour elle ou non
+//    revendiquées, ses agents, leurs états et erreurs) ; actions : assign-agent, unassign-agent, set-company-instances,
+//    prepare-agent (instance explicite, affecte en même temps), set-telegram, set-hermes-binary, set-execution-root.
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import { realpath, stat } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { instanceHomes } from "./discovery.js";
 import { withDirLock } from "./lock.js";
-import { controlDir } from "./paths.js";
-import { type HermesInstance, detectDashboards, homeFromLauncherFile, instanceNameFromHome, profileHome, readInstance } from "./hermes.js";
+import { controlDir, legacyEnvRefusal } from "./paths.js";
+import { type HermesExec, type HermesInstance, detectDashboards, instanceNameFromHome, profileHome, readInstance } from "./hermes.js";
 import { matchAgent, slug } from "./match.js";
-import { agentsMapError } from "./agents-map.js";
-import { type AgentAssignment, type CompanyEntry, type TableIssues, assignAgent, assignmentsFile, canonicalInstance, knownRoots, readAssignments, setCompanyInstances, unassignAgent } from "./assignments.js";
+import { projectionProblem } from "./agents-map.js";
+import { type AgentAssignment, type AssignmentsTable, type CompanyEntry, type TableIssues, assignAgent, assignmentsFile, canonicalInstance, executionOf, hermesSpecFor, knownRoots, readAssignments, setCompanyInstances, setExecutionRoot, setHermesBinary, unassignAgent } from "./assignments.js";
+import { type HermesBinarySpec, describeBinary, verifyHermesBinary } from "./binary.js";
+import { type ReferenceInfo, describeReference, referenceInfo } from "./reference.js";
 import { type AgentState, type ProfileHealth, agentState, checkProfile } from "./health.js";
 import { prepareAgent, profileUsability } from "./prepare.js";
 import { assertGatewayFree, setTelegramToken, startGateway, telegramConfigured } from "./telegram.js";
@@ -43,7 +51,7 @@ interface AgentSnapshot {
   title: string | null;
   status: string | null;
   cwd: string | null;
-  launcher: string | null;
+  command: string | null; // hermesCommand de l'agent : IGNORÉ depuis 0.6.1 (affiché seulement)
   want: Desired;
 }
 
@@ -68,6 +76,7 @@ interface SyncRecord {
   changed: string[];
   error: string | null;
   prepared: string[] | null; // ce que la préparation a créé (null = rien)
+  ignoredCommand: string | null; // hermesCommand de l'agent, ignoré (seul le binaire administré est lancé)
   at: string;
 }
 
@@ -75,9 +84,13 @@ const SNAPSHOT_KEY = { scopeKind: "instance" as const, stateKey: "agents" };
 const SYNC_KEY = { scopeKind: "instance" as const, stateKey: "sync" };
 export const NOT_ASSIGNED_SHORT = "non affecté";
 
-/** Binaire Hermes : HERMES_CONTROL_HERMES_BIN (chemin explicite) sinon « hermes » dans le PATH de Paperclip. */
-function hermesBinary(): string {
-  return process.env["HERMES_CONTROL_HERMES_BIN"]?.trim() || "hermes";
+/** Binaire administré (instance, sinon global), VÉRIFIÉ avant tout appel ; jamais « hermes » dans le PATH. */
+async function execFor(table: Pick<AssignmentsTable, "hermes" | "instances">, instanceHome: string | null): Promise<{ exec: HermesExec | null; error: string | null; description: string | null }> {
+  const legacy = legacyEnvRefusal();
+  if (legacy) return { exec: null, error: legacy, description: null };
+  const v = await verifyHermesBinary(hermesSpecFor(table, instanceHome));
+  if (v.ok === null) return { exec: null, error: v.error, description: null };
+  return { exec: { path: v.ok.path, pathPrefix: v.ok.pathPrefix }, error: null, description: describeBinary(v.ok) };
 }
 
 async function realOrResolved(p: string): Promise<string> {
@@ -90,9 +103,6 @@ let healthProbe: (() => Promise<string[]>) | null = null;
 const plugin = definePlugin({
   async setup(ctx: PluginContext) {
     const log = ctx.logger;
-    const BINARY = hermesBinary();
-    const launcherHomes = new Map<string, { home: string; literal: string }>(); // clé : chemin + mtime du lanceur ; jamais d'erreur en cache
-
     /** Agents Hermes de l'entreprise, réduits aux données utiles. */
     async function snapshotAgents(companyId: string): Promise<AgentSnapshot[]> {
       const agents = (await ctx.agents.list({ companyId })) as unknown as AgentLike[];
@@ -100,8 +110,8 @@ const plugin = definePlugin({
       for (const a of agents) {
         if (a.adapterType !== "hermes_local") continue;
         const ac = a.adapterConfig ?? {};
-        const launcher = typeof ac["hermesCommand"] === "string" && ac["hermesCommand"].includes("/") ? (ac["hermesCommand"] as string) : null;
-        out.push({ agentId: a.id, companyId, agentName: a.name, title: a.title ?? null, status: a.status ?? null, cwd: typeof ac["cwd"] === "string" ? (ac["cwd"] as string) : null, launcher, want: desiredFromAdapterConfig(ac) });
+        const command = typeof ac["hermesCommand"] === "string" && ac["hermesCommand"].trim() ? (ac["hermesCommand"] as string).trim() : null;
+        out.push({ agentId: a.id, companyId, agentName: a.name, title: a.title ?? null, status: a.status ?? null, cwd: typeof ac["cwd"] === "string" ? (ac["cwd"] as string) : null, command, want: desiredFromAdapterConfig(ac) });
       }
       // l'instantané garde les agents des autres entreprises (le job 5 min n'a pas de périmètre)
       const previous = ((await ctx.state.get(SNAPSHOT_KEY)) as AgentSnapshot[] | null) ?? [];
@@ -109,57 +119,16 @@ const plugin = definePlugin({
       return out;
     }
 
-    /** HERMES_HOME d'un lanceur, lu statiquement ; cache invalidé dès que le fichier change (mtime) ; une erreur n'est pas cachée. */
-    async function launcherHomeOf(launcher: string): Promise<{ home: string; literal: string } | null> {
-      const st = await stat(launcher).catch(() => null);
-      if (!st) return null;
-      const key = `${launcher}@${st.mtimeMs}`;
-      const cached = launcherHomes.get(key);
-      if (cached) return cached;
-      const r = await homeFromLauncherFile(launcher);
-      if (r.home === null) return null;
-      const v = { home: r.home, literal: r.literal };
-      launcherHomes.set(key, v);
-      return v;
-    }
-    const launcherHome = async (launcher: string): Promise<string | null> => (await launcherHomeOf(launcher))?.home ?? null;
-
-    /**
-     * Chemin réel du profil → HERMES_HOME littéral du lanceur de l'agent qui y est affecté (le lanceur doit viser ce profil).
-     * Hermes lie ses sockets sur ce littéral : c'est lui qu'on mesure. Plusieurs agents sur un profil : le plus long.
-     */
-    async function socketBases(snap: AgentSnapshot[], sync: SyncRecord[]): Promise<Map<string, string>> {
-      const out = new Map<string, string>();
-      for (const s of sync) {
-        if (!s.assignment || !s.home) continue;
-        const launcher = snap.find((a) => a.agentId === s.agentId)?.launcher;
-        if (!launcher) continue;
-        const l = await launcherHomeOf(launcher);
-        if (!l) continue;
-        const real = await realOrResolved(s.home);
-        if ((await realOrResolved(l.home)) !== real) continue;
-        const prev = out.get(real);
-        if (!prev || Buffer.byteLength(l.literal, "utf8") > Buffer.byteLength(prev, "utf8")) out.set(real, l.literal);
-      }
-      return out;
-    }
-
-    /** Instances : racines configurées (~/.hermes, roots) + celles lues STATIQUEMENT dans les lanceurs des agents (jamais exécutés). */
-    async function instances(snap: AgentSnapshot[], light: boolean): Promise<HermesInstance[]> {
-      const extra: string[] = [];
-      for (const a of snap) {
-        if (!a.launcher) continue;
-        const home = await launcherHome(a.launcher);
-        if (!home) continue;
-        // un lanceur de profil (<instance>/profiles/<p>) ramène à son instance : « profiles » en avant-dernier segment
-        const parts = home.split("/");
-        extra.push(parts[parts.length - 2] === "profiles" ? resolve(home, "..", "..") : home);
-      }
+    /** Instances : racines de la référence (~/.hermes du compte, roots, dossier de travail) ; aucun lanceur n'est lu. */
+    async function instances(light: boolean): Promise<HermesInstance[]> {
+      const read = light ? null : await readAssignments();
       const detected = light ? {} : await detectDashboards();
       const out: HermesInstance[] = [];
-      for (const home of await instanceHomes(extra)) {
+      for (const home of await instanceHomes()) {
         try {
-          out.push(await readInstance(instanceNameFromHome(home), home, null, BINARY, detected[home] ?? null, { light }));
+          // statut de connexion (`hermes auth status`) seulement avec le binaire administré et vérifié
+          const exec = read && !read.error ? (await execFor(read.table, await realOrResolved(home))).exec : null;
+          out.push(await readInstance(instanceNameFromHome(home), home, null, exec, detected[home] ?? null, { light }));
         } catch (e) {
           log.warn("instance illisible", { home, error: String(e) });
         }
@@ -198,7 +167,7 @@ const plugin = definePlugin({
       const read = await readAssignments();
       for (const a of snap) {
         const prepared = previous.find((p) => p.agentId === a.agentId)?.prepared ?? null; // mémoire de ce que la préparation a créé
-        const rec: SyncRecord = { agentId: a.agentId, companyId: a.companyId, agentName: a.agentName, instance: null, profile: null, home: null, assignment: null, suggestion: null, want: a.want, cwd: a.cwd, changed: [], error: null, prepared, at: new Date().toISOString() };
+        const rec: SyncRecord = { agentId: a.agentId, companyId: a.companyId, agentName: a.agentName, instance: null, profile: null, home: null, assignment: null, suggestion: null, want: a.want, cwd: a.cwd, changed: [], error: null, prepared, ignoredCommand: a.command, at: new Date().toISOString() };
         records.push(rec);
         if (read.error) {
           rec.error = `table des affectations refusée : ${read.error} ; aucune écriture`;
@@ -231,7 +200,7 @@ const plugin = definePlugin({
         const inst = await instanceByReal(list, asg.instanceHome);
         const profile = inst?.profiles.find((p) => p.name === asg.profile) ?? null;
         if (!inst || !profile) {
-          rec.error = `affecté à ${rec.instance}/${asg.profile} mais ce profil est introuvable (${rec.home}) : prépare-le (« Préparer l'agent ») ; aucune écriture`;
+          rec.error = `affecté au profil ${rec.home} (${rec.instance}/${asg.profile}) mais ce profil est introuvable : prépare-le (« Préparer l'agent ») ; aucune écriture`;
           continue;
         }
         const unusable = await profileUsability(asg.instanceHome, asg.profile);
@@ -245,7 +214,12 @@ const plugin = definePlugin({
           log.warn("profil non synchronisé", { agent: a.agentName, profile: `${inst.name}/${profile.name}`, error: rec.error });
           continue;
         }
-        const r = await syncProfile(profile.home, a.want, BINARY);
+        const bin = await execFor(read.table, asg.instanceHome);
+        if (!bin.exec) {
+          rec.error = `binaire Hermes refusé : ${bin.error} ; aucune écriture`;
+          continue;
+        }
+        const r = await syncProfile(profile.home, a.want, bin.exec);
         rec.changed = r.changed;
         rec.error = r.error;
         if (r.changed.length) log.info("Hermes synchronisé", { agent: a.agentName, profile: `${inst.name}/${profile.name}`, changed: r.changed });
@@ -258,22 +232,32 @@ const plugin = definePlugin({
     }
 
     /** Santé par profil (lecture seule) et état par agent (installé / connecté / connecté et synchronisé). */
-    async function healthOf(list: HermesInstance[], sync: SyncRecord[], snap: AgentSnapshot[]): Promise<{ health: Record<string, ProfileHealth>; states: Record<string, AgentState>; alerts: string[] }> {
+    async function healthOf(list: HermesInstance[], sync: SyncRecord[]): Promise<{ health: Record<string, ProfileHealth>; states: Record<string, AgentState>; alerts: string[] }> {
       const health: Record<string, ProfileHealth> = {};
       const alerts: string[] = [];
-      const bases = await socketBases(snap, sync);
+      const read = await readAssignments();
+      // sockets mesurés sur le HERMES_HOME TRANSMIS (racine d'exécution littérale) pour les profils affectés
+      const bases = new Map<string, string>();
+      if (!read.error) for (const a of Object.values(read.table.agents)) bases.set(profileHome(a.instanceHome, a.profile), executionOf(read.table, a).home);
       for (const i of list) {
         for (const p of i.profiles) {
           health[p.home] = await checkProfile(p.home, bases.get(await realOrResolved(p.home)) ?? p.home);
           for (const a of health[p.home]!.alerts) alerts.push(`${i.name}/${p.name} : ${a}`);
         }
       }
-      const mapError = await agentsMapError();
-      if (mapError) alerts.push(mapError);
-      const read = await readAssignments();
+      const legacy = legacyEnvRefusal();
+      if (legacy) alerts.push(legacy);
       if (read.error) alerts.push(read.error);
+      const proj = await projectionProblem(read.error ? null : read.sha256);
+      if (proj) alerts.push(proj);
+      if (!read.error && read.exists) {
+        const bin = await verifyHermesBinary(read.table.hermes ?? null);
+        if (bin.ok === null && !Object.values(read.table.instances ?? {}).some((x) => x.hermes)) alerts.push(`binaire Hermes : ${bin.error}`);
+      }
+      for (const [id, why] of Object.entries(read.issues.instances)) alerts.push(`instance ${id} : ${why}`);
       for (const [id, why] of Object.entries(read.issues.companies)) alerts.push(`entreprise ${id} : ${why}`);
       for (const [id, why] of Object.entries(read.issues.agents)) alerts.push(`agent ${id} : affectation invalide : ${why}`);
+      for (const s of sync) if (s.ignoredCommand) alerts.push(`agent ${s.agentId} (« ${s.agentName} ») : hermesCommand ${s.ignoredCommand} ignoré depuis 0.6.1 (seul le binaire administré est lancé) ; retire-le de la configuration de l'agent`);
       const states: Record<string, AgentState> = {};
       for (const s of sync) {
         if (!s.home) continue;
@@ -284,9 +268,8 @@ const plugin = definePlugin({
     }
 
     healthProbe = async () => {
-      const snap = ((await ctx.state.get(SNAPSHOT_KEY)) as AgentSnapshot[] | null) ?? [];
       const sync = ((await ctx.state.get(SYNC_KEY)) as SyncRecord[] | null) ?? [];
-      return (await healthOf(await instances(snap, true), sync, snap)).alerts;
+      return (await healthOf(await instances(true), sync)).alerts;
     };
 
     // ---- la seule donnée pour l'interface : lecture + synchro des agents AFFECTÉS ; n'affecte, ne prépare et n'écrit la table JAMAIS ----
@@ -294,16 +277,41 @@ const plugin = definePlugin({
       const companyId = String(params["companyId"] ?? "");
       if (!companyId) throw new Error("companyId manquant");
       const snap = await snapshotAgents(companyId);
-      const list = await instances(snap, false);
-      const sync = await syncAll(snap, list);
+      const all = await instances(false);
+      const sync = (await syncAll(snap, all)).filter((s) => s.companyId === companyId);
       const ws = await readWorkspace();
-      const telegram: Record<string, boolean> = {};
-      for (const i of list) for (const p of i.profiles) telegram[p.home] = await telegramConfigured(p.home);
-      const { health, states } = await healthOf(list, sync, snap);
       const read = await readAssignments();
+      // FILTRE PAR ENTREPRISE : instances autorisées pour elle, ou revendiquées par aucune autre entreprise ; ses agents seulement
+      const mine = new Set(read.table.companies[companyId]?.instances ?? []);
+      const others = new Set(Object.entries(read.table.companies).filter(([id]) => id !== companyId).flatMap(([, c]) => c.instances));
+      const visible: HermesInstance[] = [];
+      for (const i of all) {
+        const real = await realOrResolved(i.home);
+        if (mine.has(real) || !others.has(real)) visible.push(i);
+      }
+      const visibleHomes = new Set(visible.flatMap((i) => i.profiles.map((p) => p.home)));
+      const telegram: Record<string, boolean> = {};
+      for (const h of visibleHomes) telegram[h] = await telegramConfigured(h);
+      const { health: allHealth, states: allStates, alerts } = await healthOf(visible, sync);
+      const health: Record<string, ProfileHealth> = {};
+      for (const [h, v] of Object.entries(allHealth)) if (visibleHomes.has(h)) health[h] = v;
+      const ids = new Set(sync.map((s) => s.agentId));
+      const states: Record<string, AgentState> = {};
+      for (const [id, st] of Object.entries(allStates)) if (ids.has(id)) states[id] = st;
+      const visibleReal = new Set<string>();
+      for (const i of visible) visibleReal.add(await realOrResolved(i.home));
+      const issues: TableIssues = { companies: {}, agents: {}, instances: {} };
+      if (read.issues.companies[companyId]) issues.companies[companyId] = read.issues.companies[companyId]!;
+      for (const [id, why] of Object.entries(read.issues.agents)) if (ids.has(id) || read.table.agents[id]?.companyId === companyId) issues.agents[id] = why;
+      for (const [id, why] of Object.entries(read.issues.instances)) if (visibleReal.has(id) || mine.has(id)) issues.instances[id] = why;
       const company: CompanyEntry | null = read.table.companies[companyId] ?? null;
-      const assignments: { file: string; error: string | null; company: CompanyEntry | null; issues: TableIssues } = { file: assignmentsFile(), error: read.error, company, issues: read.issues };
-      return { instances: await instances(snap, true), sync: sync.filter((s) => s.companyId === companyId), workspace: ws, telegram, health, states, assignments };
+      const reference: ReferenceInfo = await referenceInfo();
+      const binary = await execFor(read.table, null);
+      const projection = await projectionProblem(read.error ? null : read.sha256);
+      const assignments = { file: assignmentsFile(), error: read.error, company, issues, reference, referenceLine: describeReference(reference), binary: { ok: !!binary.exec, description: binary.description, error: binary.error }, projection };
+      // alertes générales utiles à l'entreprise (table, projection, binaire, référence), sans celles des autres entreprises
+      const generalAlerts = alerts.filter((a) => !/^(agent|entreprise|instance) /.test(a) || [...ids].some((id) => a.includes(id)));
+      return { instances: visible, sync, workspace: ws, telegram, health, states, assignments, alerts: generalAlerts };
     });
 
     // ---- actions de la page (utilisateur du board seulement) ----
@@ -327,8 +335,7 @@ const plugin = definePlugin({
       if (!companyId) throw new Error("companyId requis");
       const raw = params["instances"];
       const wanted = (Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split("\n") : []).map(String).map((s) => s.trim()).filter(Boolean);
-      const snap = await snapshotAgents(companyId);
-      const known = await instances(snap, true);
+      const known = await instances(true);
       const knownReal = new Map<string, string>();
       for (const i of known) knownReal.set(await realOrResolved(i.home), i.name);
       for (const w of wanted) if (!knownReal.has(await realOrResolved(w))) throw new Error(`instance inconnue : ${w} (instances découvertes : ${[...knownReal.keys()].join(", ") || "aucune"})`);
@@ -347,7 +354,7 @@ const plugin = definePlugin({
       const profile = String(params["profile"] ?? "");
       if (!instanceHome || !profile) throw new Error("instanceHome et profile requis");
       const { snap, a } = await agentOf(companyId, agentId);
-      const list = await instances(snap, true);
+      const list = await instances(true);
       const roots = await knownRoots();
       const c = await canonicalInstance(instanceHome, roots);
       if (c.real === null) throw new Error(`affectation refusée : ${c.error}`);
@@ -370,7 +377,7 @@ const plugin = definePlugin({
       log.info("agent désaffecté", { agentId, by, removed });
       if (companyId) {
         const snap = await snapshotAgents(companyId);
-        await syncAll(snap, await instances(snap, true));
+        await syncAll(snap, await instances(true));
       }
       return { removed };
     });
@@ -390,7 +397,7 @@ const plugin = definePlugin({
       const s = slug(a.agentName);
       let instanceHome = String(params["instanceHome"] ?? "").trim();
       if (current) {
-        if (current.profile !== s) throw new Error(`agent déjà affecté au profil ${current.instanceHome}/${current.profile} (≠ « ${s} ») : rien à préparer ; désaffecte-le d'abord pour changer`);
+        if (current.profile !== s) throw new Error(`agent déjà affecté au profil ${profileHome(current.instanceHome, current.profile)} (≠ « ${s} ») : rien à préparer ; désaffecte-le d'abord pour changer`);
         if (instanceHome && (await canonicalInstance(instanceHome, roots)).real !== current.instanceHome) throw new Error(`agent déjà affecté à ${current.instanceHome} ; désaffecte-le d'abord pour changer d'instance`);
         instanceHome = current.instanceHome;
       }
@@ -400,12 +407,14 @@ const plugin = definePlugin({
       const company = read.table.companies[companyId];
       if (!company || !company.instances.includes(c.real)) throw new Error(`préparation refusée : ${c.real} n'est pas une instance autorisée de l'entreprise (autorisées : ${company?.instances.join(", ") || "aucune — déclare-les d'abord"})`);
       const taken = Object.entries(read.table.agents).find(([id, x]) => id !== agentId && x.instanceHome === c.real && x.profile === s);
-      if (taken) throw new Error(`préparation refusée : le profil ${c.real}/${s} est déjà affecté à « ${taken[1].name} » (${taken[0]})`);
+      if (taken) throw new Error(`préparation refusée : le profil ${profileHome(c.real, s)} est déjà affecté à « ${taken[1].name} » (${taken[0]})`);
       const name = await companyName(companyId);
-      const r = await prepareAgent({ ws, instanceHome: c.real, agentName: a.agentName, title: a.title, binary: BINARY, entreprise: name });
+      const bin = await execFor(read.table, c.real);
+      if (!bin.exec) throw new Error(`préparation refusée : binaire Hermes refusé : ${bin.error}`);
+      const r = await prepareAgent({ ws, instanceHome: c.real, agentName: a.agentName, title: a.title, binary: bin.exec, entreprise: name });
       if (!current) await assignAgent({ agentId, companyId, companyName: name, instanceHome: c.real, profile: s, name: a.agentName, assignedBy: by }, { roots });
       log.info("agent préparé", { agent: a.agentName, profile: `${instanceNameFromHome(c.real)}/${r.profile}`, created: r.created.length, warnings: r.warnings, by });
-      const sync = await syncAll(snap, await instances(snap, true));
+      const sync = await syncAll(snap, await instances(true));
       const rec = sync.find((x) => x.agentId === agentId);
       if (rec) {
         rec.prepared = r.created;
@@ -414,14 +423,63 @@ const plugin = definePlugin({
       return { created: r.created, warnings: r.warnings };
     });
 
+    /** Binaire Hermes administré : global, ou pour une instance AUTORISÉE de l'entreprise. Vérifié avant d'être écrit. */
+    ctx.actions.register("set-hermes-binary", async (params, actx) => {
+      const by = requireUser(actx);
+      const companyId = String(params["companyId"] ?? actx.companyId ?? "");
+      const binary = String(params["binary"] ?? "").trim();
+      const linkTarget = String(params["linkTarget"] ?? "").trim();
+      const sha = String(params["sha256"] ?? "").trim();
+      const instanceHome = String(params["instanceHome"] ?? "").trim();
+      let key: string | null = null;
+      if (instanceHome) {
+        const roots = await knownRoots();
+        const c = await canonicalInstance(instanceHome, roots);
+        if (c.real === null) throw new Error(`binaire refusé : ${c.error}`);
+        const read = await readAssignments({ roots });
+        if (!read.table.companies[companyId]?.instances.includes(c.real)) throw new Error(`binaire refusé : ${c.real} n'est pas une instance autorisée de cette entreprise`);
+        key = c.real;
+      }
+      const spec: HermesBinarySpec | null = binary ? { binary, ...(linkTarget ? { linkTarget } : {}), ...(sha ? { sha256: sha } : {}) } : null;
+      await setHermesBinary(spec, { instanceHome: key });
+      const v = spec ? await verifyHermesBinary(spec) : null;
+      log.info("binaire Hermes administré", { instance: key ?? "global", binary: spec?.binary ?? null, by });
+      return { binary: spec?.binary ?? null, description: v?.ok ? describeBinary(v.ok) : null };
+    });
+
+    /** Racine d'exécution littérale (courte) d'une instance AUTORISÉE de l'entreprise : même instance (realpath) exigée. */
+    ctx.actions.register("set-execution-root", async (params, actx) => {
+      const by = requireUser(actx);
+      const companyId = String(params["companyId"] ?? actx.companyId ?? "");
+      const instanceHome = String(params["instanceHome"] ?? "").trim();
+      const executionRoot = String(params["executionRoot"] ?? "").trim();
+      const roots = await knownRoots();
+      const c = await canonicalInstance(instanceHome, roots);
+      if (c.real === null) throw new Error(`racine d'exécution refusée : ${c.error}`);
+      const read = await readAssignments({ roots });
+      if (!read.table.companies[companyId]?.instances.includes(c.real)) throw new Error(`racine d'exécution refusée : ${c.real} n'est pas une instance autorisée de cette entreprise`);
+      await setExecutionRoot(c.real, executionRoot || null, { roots });
+      log.info("racine d'exécution", { instance: c.real, executionRoot: executionRoot || null, by });
+      return { instance: c.real, executionRoot: executionRoot || null };
+    });
+
     ctx.actions.register("set-telegram", async (params, actx) => {
       const home = String(params["home"] ?? "");
       const token = String(params["token"] ?? "");
       requireUser(actx);
       // le chemin doit être un profil connu (jamais un chemin libre venu de la page)
-      const snap = ((await ctx.state.get(SNAPSHOT_KEY)) as AgentSnapshot[] | null) ?? [];
-      const known = (await instances(snap, true)).flatMap((i) => i.profiles.map((p) => p.home));
+      const list = await instances(true);
+      const known = list.flatMap((i) => i.profiles.map((p) => p.home));
       if (!known.includes(home)) throw new Error("profil Hermes inconnu");
+      const owner = list.find((i) => i.profiles.some((p) => p.home === home))!;
+      const ownerReal = await realOrResolved(owner.home);
+      const read = await readAssignments();
+      if (read.error) throw new Error(`${read.error} ; rien n'est écrit`);
+      const bin = await execFor(read.table, ownerReal);
+      if (!bin.exec) throw new Error(`passerelle refusée : binaire Hermes refusé : ${bin.error}`);
+      // HERMES_HOME transmis : la racine d'exécution littérale de l'instance (sockets courts), même profil
+      const profileName = owner.profiles.find((p) => p.home === home)!.name;
+      const gatewayHome = executionOf(read.table, { instanceHome: ownerReal, profile: profileName }).home;
       // un seul set-telegram à la fois : le garde-fou « passerelle unique » lit puis écrit
       const lock = join(controlDir(), "set-telegram.lock");
       return withDirLock(lock, { waitMs: 2_000, staleMs: 30_000, busy: "un autre enregistrement de jeton Telegram est en cours ; réessaie" }, async () => {
@@ -429,7 +487,7 @@ const plugin = definePlugin({
         const changed = await setTelegramToken(home, token);
         let gateway = "";
         try {
-          gateway = (await startGateway(home, BINARY)).trim().split("\n").slice(-2).join(" ");
+          gateway = (await startGateway(gatewayHome, bin.exec!)).trim().split("\n").slice(-2).join(" ");
         } catch (e) {
           gateway = e instanceof Error ? e.message : String(e);
         }
@@ -445,7 +503,7 @@ const plugin = definePlugin({
         if (!companyId) return;
         try {
           const snap = await snapshotAgents(companyId);
-          await syncAll(snap, await instances(snap, true));
+          await syncAll(snap, await instances(true));
         } catch (e) {
           log.warn("synchronisation après événement impossible", { type, error: String(e) });
         }
@@ -456,10 +514,10 @@ const plugin = definePlugin({
     ctx.jobs.register("sync", async () => {
       const snap = ((await ctx.state.get(SNAPSHOT_KEY)) as AgentSnapshot[] | null) ?? [];
       if (!snap.length) return;
-      await syncAll(snap, await instances(snap, true));
+      await syncAll(snap, await instances(true));
     });
 
-    log.info("Hermes Control prêt (Paperclip → Hermes, affectation explicite)");
+    log.info("Hermes Control prêt (Paperclip → Hermes, affectation explicite)", { reference: describeReference(await referenceInfo()) });
   },
 
   async onHealth() {

@@ -1,22 +1,30 @@
-// Table des AFFECTATIONS EXPLICITES : `~/.config/hermes-control/assignments.json` (surchargeable : HERMES_CONTROL_ASSIGNMENTS).
-// La seule source de vérité « (companyId, agentId) → instance / profil » de Hermes Control (le futur identites.json du
-// pack en dérivera ou la remplacera, jamais les deux en parallèle). Rien n'y entre par le nom : seules les actions
-// d'administration (assign-agent, unassign-agent, set-company-instances, prepare-agent) et le script de migration écrivent.
+// Table des AFFECTATIONS EXPLICITES : `<référence>/assignments.json`, la référence étant `<compte>/.config/hermes-control`
+// (src/paths.ts : dossier du compte Unix selon getpwuid, jamais $HOME ni une variable ; plugin et adaptateur lisent donc
+// le même fichier). La seule source de vérité « (companyId, agentId) → instance / profil » ET de l'exécution Hermes (binaire
+// administré, racine d'exécution littérale par instance). Rien n'y entre par le nom : seules les actions d'administration
+// (assign-agent, unassign-agent, set-company-instances, prepare-agent, set-hermes-binary, set-execution-root), le script
+// de migration (--apply) ou l'administrateur à la main (validé à la lecture) l'écrivent.
 //   { schemaVersion: 1,
-//     companies: { [companyId]: { name, instances: [instanceHome…] } },          ← instances AUTORISÉES de l'entreprise
-//     agents: { [agentId]: { companyId, instanceHome, profile, name, assignedAt, assignedBy } },
-//     approvedBinaries?: [chemin…] }                                               ← binaires Hermes acceptés comme hermesCommand
+//     hermes?: { binary, linkTarget?, sha256? },                                    ← point d'entrée Hermes administré (global)
+//     instances?: { [instance canonique]: { executionRoot?, hermes? } },            ← racine d'EXÉCUTION littérale (courte), binaire propre
+//     companies: { [companyId]: { name, instances: [instanceHome…] } },            ← instances AUTORISÉES de l'entreprise
+//     agents: { [agentId]: { companyId, instanceHome, profile, name, assignedAt, assignedBy } } }
+// `instanceHome` est la racine CANONIQUE (realpath, sert à vérifier) ; `executionRoot` la racine transmise à Hermes telle
+// quelle (absolue, `~/` développé explicitement depuis le dossier du compte, sans « . » ni « .. »), qui doit désigner la
+// même instance (realpath identique). HERMES_HOME = executionRoot (profil `default`) ou executionRoot/profiles/<profil>.
 // Validation à la lecture ET à l'écriture : l'instance d'un agent appartient aux instances autorisées de son entreprise ;
 // deux agents ne revendiquent pas le même profil ; chaque instance, résolue par realpath, est dans une racine connue
-// (~/.hermes, ~/.config/hermes-control/roots, HERMES_CONTROL_ROOTS, <ws>/hermes/profils). Fichier corrompu → refus.
+// (~/.hermes du compte, <référence>/roots, <ws>/hermes/profils). Fichier corrompu → refus. `approvedBinaries` (0.6.0)
+// n'existe plus : une table qui le contient est refusée avec un message explicite.
 // Écriture atomique (tmp + rename, 600) sous verrou à bail ; la projection agents.json est réécrite dans la foulée.
 import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { type HermesBinarySpec, strictAbsolute, verifyHermesBinary } from "./binary.js";
 import { configuredRoots } from "./discovery.js";
 import { assertSafeName, profileHome } from "./hermes.js";
 import { withDirLock } from "./lock.js";
-import { controlDir } from "./paths.js";
+import { accountHome, controlDir } from "./paths.js";
 import { type Projection, projectionOf, readProjection, writeProjection } from "./agents-map.js";
 import { readWorkspace } from "./workspace.js";
 
@@ -34,16 +42,23 @@ export interface AgentAssignment {
   assignedBy: string; // « user:<id> », « migration », « event:agent.created »…
 }
 
+export interface InstanceSettings {
+  executionRoot?: string; // racine transmise à Hermes (littérale, courte) ; absente → la racine canonique elle-même
+  hermes?: HermesBinarySpec; // binaire propre à cette instance (prioritaire sur le global)
+}
+
 export interface AssignmentsTable {
   schemaVersion: 1;
+  hermes?: HermesBinarySpec;
+  instances?: Record<string, InstanceSettings>;
   companies: Record<string, CompanyEntry>;
   agents: Record<string, AgentAssignment>;
-  approvedBinaries?: string[];
 }
 
 export interface TableIssues {
   companies: Record<string, string>; // companyId → raison
   agents: Record<string, string>; // agentId → raison
+  instances: Record<string, string>; // instance (clé de `instances`) → raison
 }
 
 export interface ReadResult {
@@ -57,7 +72,9 @@ export interface ReadResult {
 
 export interface ResolvedAssignment extends AgentAssignment {
   agentId: string;
-  home: string; // racine du profil = HERMES_HOME
+  home: string; // racine CANONIQUE du profil (vérifications : config.yaml, préparation, skills)
+  execution: { root: string; home: string }; // racine d'exécution littérale et HERMES_HOME transmis à Hermes (sockets mesurés dessus)
+  hermes: HermesBinarySpec | null; // binaire administré (instance, sinon global) ; null = non administré
   source: "table" | "projection";
 }
 
@@ -66,9 +83,9 @@ const LOCK_WAIT_MS = 2_000;
 const LOCK_STALE_MS = 30_000;
 const SAFE_PROFILE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 
+/** La table : toujours `<référence>/assignments.json` (aucune variable d'environnement ne la déplace). */
 export function assignmentsFile(): string {
-  const env = process.env["HERMES_CONTROL_ASSIGNMENTS"]?.trim();
-  return env || join(controlDir(), "assignments.json");
+  return join(controlDir(), "assignments.json");
 }
 
 export function emptyTable(): AssignmentsTable {
@@ -79,7 +96,7 @@ export function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
-export const noIssues = (): TableIssues => ({ companies: {}, agents: {} });
+export const noIssues = (): TableIssues => ({ companies: {}, agents: {}, instances: {} });
 
 /* ---------- schéma ---------- */
 
@@ -115,11 +132,69 @@ export function parseTable(parsed: unknown): { table: AssignmentsTable; error: n
     outA[id] = { companyId: e["companyId"] as string, instanceHome: e["instanceHome"] as string, profile: e["profile"] as string, name: e["name"] as string, assignedAt: e["assignedAt"] as string, assignedBy: e["assignedBy"] as string };
   }
   const table: AssignmentsTable = { schemaVersion: 1, companies: outC, agents: outA };
-  if (t["approvedBinaries"] !== undefined) {
-    if (!isStringArray(t["approvedBinaries"])) return bad("`approvedBinaries` n'est pas une liste");
-    table.approvedBinaries = [...t["approvedBinaries"]];
+  if (t["approvedBinaries"] !== undefined) return bad("`approvedBinaries` n'existe plus depuis 0.6.1 (les noms et scripts ne sont plus approuvés) : remplace-le par `hermes: { binary: \"/chemin/absolu/du/point/d'entrée\" }`");
+  if (t["hermes"] !== undefined) {
+    const h = parseSpec(t["hermes"], "hermes");
+    if (typeof h === "string") return bad(h);
+    table.hermes = h;
+  }
+  if (t["instances"] !== undefined) {
+    const inst = t["instances"];
+    if (!inst || typeof inst !== "object" || Array.isArray(inst)) return bad("`instances` n'est pas un objet");
+    const out: Record<string, InstanceSettings> = {};
+    for (const [key, v] of Object.entries(inst as Record<string, unknown>)) {
+      if (!isAbsolute(key)) return bad(`instances : clé non absolue « ${key} »`);
+      if (!v || typeof v !== "object" || Array.isArray(v)) return bad(`instances[${key}] n'est pas un objet`);
+      const e = v as Record<string, unknown>;
+      const s: InstanceSettings = {};
+      if (e["executionRoot"] !== undefined) {
+        if (typeof e["executionRoot"] !== "string" || !e["executionRoot"]) return bad(`instances[${key}].executionRoot n'est pas un chemin`);
+        s.executionRoot = e["executionRoot"];
+      }
+      if (e["hermes"] !== undefined) {
+        const h = parseSpec(e["hermes"], `instances[${key}].hermes`);
+        if (typeof h === "string") return bad(h);
+        s.hermes = h;
+      }
+      out[key] = s;
+    }
+    table.instances = out;
   }
   return { table, error: null };
+}
+
+function parseSpec(x: unknown, where: string): HermesBinarySpec | string {
+  if (!x || typeof x !== "object" || Array.isArray(x)) return `${where} n'est pas un objet { binary, linkTarget?, sha256? }`;
+  const e = x as Record<string, unknown>;
+  if (typeof e["binary"] !== "string" || !isAbsolute(e["binary"])) return `${where}.binary doit être un chemin absolu`;
+  const spec: HermesBinarySpec = { binary: e["binary"] };
+  if (e["linkTarget"] !== undefined) {
+    if (typeof e["linkTarget"] !== "string" || !isAbsolute(e["linkTarget"])) return `${where}.linkTarget doit être un chemin absolu`;
+    spec.linkTarget = e["linkTarget"];
+  }
+  if (e["sha256"] !== undefined) {
+    if (typeof e["sha256"] !== "string" || !/^[0-9a-f]{64}$/i.test(e["sha256"])) return `${where}.sha256 doit être une empreinte sha256 hexadécimale`;
+    spec.sha256 = e["sha256"].toLowerCase();
+  }
+  return spec;
+}
+
+/** Racine d'exécution administrée → chemin littéral transmis (`~/` développé depuis le dossier du compte) ; erreur si non conforme. */
+export function expandExecutionRoot(raw: string): { literal: string; error: null } | { literal: null; error: string } {
+  const literal = raw === "~" ? accountHome() : raw.startsWith("~/") ? accountHome() + raw.slice(1) : raw;
+  const bad = strictAbsolute(literal, "racine d'exécution");
+  if (bad) return { literal: null, error: bad };
+  return { literal: literal.length > 1 && literal.endsWith("/") ? literal.slice(0, -1) : literal, error: null };
+}
+
+/** HERMES_HOME transmis : la racine elle-même pour le profil `default`, sinon <racine>/profiles/<profil> (comme profileHome). */
+export function executionHome(executionRoot: string, profile: string): string {
+  return profile === "default" ? executionRoot : `${executionRoot}/profiles/${assertSafeName(profile)}`;
+}
+
+/** Binaire administré pour une instance (canonique) : celui de l'instance, sinon le global ; null s'il n'y en a pas. */
+export function hermesSpecFor(table: Pick<AssignmentsTable, "hermes" | "instances">, instanceHome: string | null): HermesBinarySpec | null {
+  return (instanceHome ? table.instances?.[instanceHome]?.hermes : undefined) ?? table.hermes ?? null;
 }
 
 /* ---------- racines connues et chemins canoniques ---------- */
@@ -158,6 +233,26 @@ export async function relationalIssues(table: AssignmentsTable, roots: string[])
     if (!realOf.has(p)) realOf.set(p, (await canonicalInstance(p, roots)).real);
     return realOf.get(p) ?? null;
   };
+  for (const [key, settings] of Object.entries(table.instances ?? {})) {
+    const r = await real(key);
+    if (!r) {
+      issues.instances[key] = (await canonicalInstance(key, roots)).error ?? `instance ${key} invalide`;
+      continue;
+    }
+    if (r !== key) {
+      issues.instances[key] = `instances : la clé doit être la racine canonique (realpath) ${r}, pas ${key}`;
+      continue;
+    }
+    if (settings.executionRoot !== undefined) {
+      const ex = expandExecutionRoot(settings.executionRoot);
+      if (ex.literal === null) {
+        issues.instances[key] = ex.error;
+        continue;
+      }
+      const exReal = await realpath(ex.literal).catch(() => null);
+      if (exReal !== key) issues.instances[key] = `racine d'exécution ${ex.literal} : désigne ${exReal ?? "un chemin introuvable"}, pas l'instance ${key} ; refus`;
+    }
+  }
   const authorized = new Map<string, Set<string>>(); // companyId → instances réelles autorisées
   for (const [cid, c] of Object.entries(table.companies)) {
     const set = new Set<string>();
@@ -188,13 +283,22 @@ export async function relationalIssues(table: AssignmentsTable, roots: string[])
       issues.agents[aid] = `instance ${r} non autorisée pour l'entreprise « ${company.name} » (${a.companyId})`;
       continue;
     }
+    if (r !== a.instanceHome) {
+      issues.agents[aid] = `instanceHome ${a.instanceHome} n'est pas canonique (realpath ${r}) : la table garde la racine canonique, la racine courte va dans instances[…].executionRoot`;
+      continue;
+    }
+    const instIssue = issues.instances[r];
+    if (instIssue) {
+      issues.agents[aid] = `instance ${r} : ${instIssue}`;
+      continue;
+    }
     const key = `${r}|${a.profile}`;
     claims.set(key, [...(claims.get(key) ?? []), aid]);
   }
   for (const [key, ids] of claims) {
     if (ids.length < 2) continue;
     const [inst, profile] = key.split("|");
-    for (const id of ids) issues.agents[id] = `profil ${inst}/${profile} revendiqué par ${ids.length} agents (${ids.join(", ")})`;
+    for (const id of ids) issues.agents[id] = `profil ${profileHome(inst!, profile!)} revendiqué par ${ids.length} agents (${ids.join(", ")})`;
   }
   return issues;
 }
@@ -228,7 +332,18 @@ export async function readAssignments(opts: { roots?: string[] } = {}): Promise<
 function projectionTable(p: Projection): AssignmentsTable {
   const agents: Record<string, AgentAssignment> = {};
   for (const [id, a] of Object.entries(p.agents)) agents[id] = { companyId: a.companyId, instanceHome: a.instanceHome, profile: a.profile, name: a.name, assignedAt: a.at, assignedBy: a.by };
-  return { schemaVersion: 1, companies: p.companies, agents };
+  const t: AssignmentsTable = { schemaVersion: 1, companies: p.companies, agents };
+  if (p.hermes) t.hermes = p.hermes;
+  if (p.instances) t.instances = p.instances;
+  return t;
+}
+
+/** Racine d'exécution littérale et HERMES_HOME d'une affectation (la table a déjà été validée). */
+export function executionOf(table: Pick<AssignmentsTable, "instances">, a: Pick<AgentAssignment, "instanceHome" | "profile">): { root: string; home: string } {
+  const raw = table.instances?.[a.instanceHome]?.executionRoot;
+  const ex = raw ? expandExecutionRoot(raw) : null;
+  const root = ex?.literal ?? a.instanceHome;
+  return { root, home: executionHome(root, a.profile) };
 }
 
 /**
@@ -236,10 +351,10 @@ function projectionTable(p: Projection): AssignmentsTable {
  * qu'en secours quand la table est présente mais illisible pour ce lecteur ET que la projection porte son empreinte exacte.
  * `companyId` (ctx.agent.companyId) : l'affectation doit être celle de cette entreprise.
  */
-export type Resolution = { ok: ResolvedAssignment; reason: null; approvedBinaries: string[] } | { ok: null; reason: string; approvedBinaries: string[] };
+export type Resolution = { ok: ResolvedAssignment; reason: null } | { ok: null; reason: string };
 
 export async function resolveAssignment(agentId: string, opts: { companyId?: string | null; roots?: string[] } = {}): Promise<Resolution> {
-  if (!agentId) return { ok: null, reason: "agent sans identifiant", approvedBinaries: [] };
+  if (!agentId) return { ok: null, reason: "agent sans identifiant" };
   const roots = opts.roots ?? (await knownRoots());
   const read = await readAssignments({ roots });
   let table = read.table;
@@ -247,20 +362,19 @@ export async function resolveAssignment(agentId: string, opts: { companyId?: str
   let source: ResolvedAssignment["source"] = "table";
   if (read.error) {
     const { projection } = await readProjection();
-    if (!projection || !read.sha256 || projection.derivedFrom.sha256 !== read.sha256) return { ok: null, reason: `${read.error} ; aucune projection agents.json de secours à la même empreinte`, approvedBinaries: [] };
+    if (!projection || !read.sha256 || projection.derivedFrom.sha256 !== read.sha256) return { ok: null, reason: `${read.error} ; aucune projection agents.json de secours à la même empreinte` };
     table = projectionTable(projection);
     issues = await relationalIssues(table, roots);
     source = "projection";
   } else if (!read.exists) {
-    return { ok: null, reason: `${NOT_ASSIGNED} — table absente : ${assignmentsFile()}`, approvedBinaries: [] };
+    return { ok: null, reason: `${NOT_ASSIGNED} — table absente : ${assignmentsFile()}` };
   }
-  const approvedBinaries = table.approvedBinaries ?? [];
   const a = table.agents[agentId];
-  if (!a) return { ok: null, reason: `${NOT_ASSIGNED} (table : ${assignmentsFile()})`, approvedBinaries };
+  if (!a) return { ok: null, reason: `${NOT_ASSIGNED} (table : ${assignmentsFile()})` };
   const issue = issues.agents[agentId];
-  if (issue) return { ok: null, reason: `affectation invalide : ${issue}`, approvedBinaries };
-  if (opts.companyId && a.companyId !== opts.companyId) return { ok: null, reason: `affectation enregistrée pour l'entreprise ${a.companyId}, pas pour ${opts.companyId}`, approvedBinaries };
-  return { ok: { ...a, agentId, home: profileHome(a.instanceHome, a.profile), source }, reason: null, approvedBinaries };
+  if (issue) return { ok: null, reason: `affectation invalide : ${issue}` };
+  if (opts.companyId && a.companyId !== opts.companyId) return { ok: null, reason: `affectation enregistrée pour l'entreprise ${a.companyId}, pas pour ${opts.companyId}` };
+  return { ok: { ...a, agentId, home: profileHome(a.instanceHome, a.profile), execution: executionOf(table, a), hermes: hermesSpecFor(table, a.instanceHome), source }, reason: null };
 }
 
 /* ---------- écritures (actions d'administration seulement) ---------- */
@@ -278,7 +392,7 @@ async function writeTable(table: AssignmentsTable): Promise<string> {
   await writeFile(tmp, text, { mode: 0o600 });
   await rename(tmp, file);
   const digest = sha256(text);
-  await writeProjection(projectionOf(table, file, digest, profileHome));
+  await writeProjection(projectionOf(table, file, digest, (i, p) => executionOf(table, { instanceHome: i, profile: p }).home));
   return digest;
 }
 
@@ -294,6 +408,7 @@ async function mutate(change: (table: AssignmentsTable) => void | Promise<void>,
     const fresh: string[] = [];
     for (const [id, why] of Object.entries(after.companies)) if (before.issues.companies[id] !== why) fresh.push(`entreprise ${id} : ${why}`);
     for (const [id, why] of Object.entries(after.agents)) if (before.issues.agents[id] !== why) fresh.push(`agent ${id} : ${why}`);
+    for (const [id, why] of Object.entries(after.instances)) if (before.issues.instances[id] !== why) fresh.push(`instance ${id} : ${why}`);
     if (fresh.length) throw new Error(`affectation refusée : ${fresh.join(" ; ")}`);
     await writeTable(table);
     return table;
@@ -339,11 +454,11 @@ export async function assignAgent(input: AssignInput, opts: { roots?: string[] }
     if (!company) throw new Error(`affectation refusée : aucune instance autorisée déclarée pour l'entreprise « ${input.companyName ?? input.companyId} » ; déclare-les d'abord (action set-company-instances)`);
     if (!company.instances.includes(c.real)) throw new Error(`affectation refusée : ${c.real} n'est pas une instance autorisée de l'entreprise « ${company.name} » (autorisées : ${company.instances.join(", ") || "aucune"})`);
     const taken = Object.entries(t.agents).find(([id, a]) => id !== input.agentId && a.instanceHome === c.real && a.profile === profile);
-    if (taken) throw new Error(`affectation refusée : le profil ${c.real}/${profile} est déjà affecté à l'agent « ${taken[1].name} » (${taken[0]})`);
+    if (taken) throw new Error(`affectation refusée : le profil ${profileHome(c.real, profile)} est déjà affecté à l'agent « ${taken[1].name} » (${taken[0]})`);
     t.agents[input.agentId] = { companyId: input.companyId, instanceHome: c.real, profile, name: input.name, assignedAt: new Date().toISOString(), assignedBy: input.assignedBy };
   }, roots);
   const a = table.agents[input.agentId]!;
-  return { ...a, agentId: input.agentId, home: profileHome(a.instanceHome, a.profile), source: "table" };
+  return { ...a, agentId: input.agentId, home: profileHome(a.instanceHome, a.profile), execution: executionOf(table, a), hermes: hermesSpecFor(table, a.instanceHome), source: "table" };
 }
 
 export async function unassignAgent(agentId: string, opts: { roots?: string[] } = {}): Promise<boolean> {
@@ -363,19 +478,58 @@ export async function replaceTable(table: AssignmentsTable, opts: { roots?: stri
   const roots = opts.roots ?? (await knownRoots());
   return withTableLock(async () => {
     const issues = await relationalIssues(p.table, roots);
-    const all = [...Object.entries(issues.companies).map(([id, w]) => `entreprise ${id} : ${w}`), ...Object.entries(issues.agents).map(([id, w]) => `agent ${id} : ${w}`)];
+    const all = [...Object.entries(issues.instances).map(([id, w]) => `instance ${id} : ${w}`), ...Object.entries(issues.companies).map(([id, w]) => `entreprise ${id} : ${w}`), ...Object.entries(issues.agents).map(([id, w]) => `agent ${id} : ${w}`)];
     if (all.length) throw new Error(`table refusée : ${all.join(" ; ")}`);
     await writeTable(p.table);
     return p.table;
   });
 }
 
-/** Un `hermesCommand` est-il un binaire Hermes approuvé (par opposition à un script lanceur) ? */
-export function isApprovedBinary(command: string, table: Pick<AssignmentsTable, "approvedBinaries">): boolean {
-  const c = command.trim();
-  if (!c) return false;
-  if (!c.includes("/")) return true; // nom nu résolu par le PATH de Paperclip : pas un script à lire
-  const explicit = process.env["HERMES_CONTROL_HERMES_BIN"]?.trim();
-  if (explicit && resolve(c) === resolve(explicit)) return true;
-  return (table.approvedBinaries ?? []).some((b) => resolve(b) === resolve(c));
+/**
+ * Binaire Hermes administré : global (`instanceHome` absent) ou propre à une instance (racine canonique). Vérifié AVANT
+ * d'être écrit (même contrôle qu'avant chaque passage) ; `null` retire le champ.
+ */
+export async function setHermesBinary(spec: HermesBinarySpec | null, opts: { instanceHome?: string | null; roots?: string[] } = {}): Promise<AssignmentsTable> {
+  const roots = opts.roots ?? (await knownRoots());
+  let key: string | null = null;
+  if (opts.instanceHome) {
+    const c = await canonicalInstance(opts.instanceHome, roots);
+    if (c.real === null) throw new Error(`binaire refusé : ${c.error}`);
+    key = c.real;
+  }
+  if (spec) {
+    const v = await verifyHermesBinary(spec);
+    if (v.ok === null) throw new Error(`binaire refusé : ${v.error}`);
+  }
+  return mutate((t) => {
+    if (key === null) {
+      if (spec) t.hermes = { ...spec };
+      else delete t.hermes;
+      return;
+    }
+    const s = { ...(t.instances?.[key] ?? {}) };
+    if (spec) s.hermes = { ...spec };
+    else delete s.hermes;
+    t.instances = { ...(t.instances ?? {}), [key]: s };
+  }, roots);
+}
+
+/** Racine d'exécution littérale d'une instance (absolue ou `~/…`) ; elle doit désigner la même instance (realpath). `null` la retire. */
+export async function setExecutionRoot(instanceHome: string, executionRoot: string | null, opts: { roots?: string[] } = {}): Promise<AssignmentsTable> {
+  const roots = opts.roots ?? (await knownRoots());
+  const c = await canonicalInstance(instanceHome, roots);
+  if (c.real === null) throw new Error(`racine d'exécution refusée : ${c.error}`);
+  const key = c.real;
+  if (executionRoot !== null) {
+    const ex = expandExecutionRoot(executionRoot);
+    if (ex.literal === null) throw new Error(`racine d'exécution refusée : ${ex.error}`);
+    const exReal = await realpath(ex.literal).catch(() => null);
+    if (exReal !== key) throw new Error(`racine d'exécution refusée : ${ex.literal} désigne ${exReal ?? "un chemin introuvable"}, pas l'instance ${key}`);
+  }
+  return mutate((t) => {
+    const s = { ...(t.instances?.[key] ?? {}) };
+    if (executionRoot !== null) s.executionRoot = executionRoot;
+    else delete s.executionRoot;
+    t.instances = { ...(t.instances ?? {}), [key]: s };
+  }, roots);
 }

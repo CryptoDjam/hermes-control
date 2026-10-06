@@ -6,8 +6,10 @@ import { createTestHarness } from "@paperclipai/plugin-sdk";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 import manifest from "./manifest.js";
 import plugin from "./worker.js";
-import { assignAgent, assignmentsFile, readAssignments, setCompanyInstances } from "./assignments.js";
+import { assignAgent, assignmentsFile, readAssignments, setCompanyInstances, setHermesBinary } from "./assignments.js";
 import { agentsMapFile } from "./agents-map.js";
+import { fakeCalls, makeFakeHermes, writeRoots, writeWorkspaceFile } from "./testkit.js";
+import { sha256 } from "./assignments.js";
 
 async function start() {
   const h = createTestHarness({ manifest: manifest as unknown as PaperclipPluginManifestV1, config: {} });
@@ -67,20 +69,13 @@ describe("affectation explicite (table assignments.json) — aucune affectation 
   let savedPath: string | undefined;
   let instA: string;
   let instB: string;
+  let fake: string;
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "hc-w-")); // court : les profils préparés doivent rester sous 100 octets de chemin de socket
     savedHome = process.env["HOME"]; savedPath = process.env["PATH"];
     process.env["HOME"] = root;
-    // faux hermes en tête de PATH : « profile create » clone l'instance ; « config set » laisse une trace ; tout le reste répond vide
-    const bin = join(root, "bin"); await mkdir(bin, { recursive: true });
-    await writeFile(join(bin, "hermes"), `#!/bin/bash
-if [ "$1" = "profile" ] && [ "$2" = "create" ]; then p="$HERMES_HOME/profiles/$3"; mkdir -p "$p/skills"; cp "$HERMES_HOME/config.yaml" "$p/config.yaml"; [ -f "$HERMES_HOME/.env" ] && cp "$HERMES_HOME/.env" "$p/.env"; printf 'description: %s\\n' "$6" > "$p/profile.yaml"; exit 0; fi
-if [ "$1" = "config" ] && [ "$2" = "set" ]; then echo "$HERMES_HOME $3=$4" >> "$HERMES_CONTROL_TEST_ROOT/hermes-config-set"; exit 0; fi
-exit 0
-`);
-    await chmod(join(bin, "hermes"), 0o755);
-    process.env["PATH"] = `${bin}:${savedPath ?? ""}`;
-    process.env["HERMES_CONTROL_TEST_ROOT"] = root;
+    // faux point d'entrée Hermes ADMINISTRÉ (Python, comme le vrai) : « profile create » clone l'instance ; « config set » laisse une trace
+    fake = await makeFakeHermes(join(root, "bin"));
     const ws = join(root, "ws");
     instA = join(ws, "hermes", "profils", "societe-a");
     instB = join(ws, "hermes", "profils", "societe-b");
@@ -93,9 +88,9 @@ exit 0
     await mkdir(join(instA, "profiles", "assistant"), { recursive: true });
     await writeFile(join(instA, "profiles", "assistant", "config.yaml"), "model:\n  provider: openai-codex\n  default: gpt-5.6-luna\n");
     await writeFile(join(instA, "profiles", "assistant", "SOUL.md"), "# assistant de A\n");
-    await mkdir(join(root, ".config", "hermes-control"), { recursive: true });
-    await writeFile(join(root, ".config", "hermes-control", "workspace"), ws + "\n");
-    await writeFile(join(root, ".config", "hermes-control", "roots"), join(ws, "hermes", "profils") + "\n");
+    await writeWorkspaceFile(ws);
+    await writeRoots(join(ws, "hermes", "profils"));
+    await setHermesBinary({ binary: fake });
   });
   afterEach(() => { if (savedHome) process.env["HOME"] = savedHome; if (savedPath) process.env["PATH"] = savedPath; });
 
@@ -297,35 +292,105 @@ exit 0
     await expect(stat(join(root, "hermes-config-set"))).rejects.toThrow();
   });
 
-  it("lanceur d'agent lu statiquement : un lanceur de profil ramène à son instance ; le cache suit le mtime ; un lanceur incertain n'ajoute rien", async () => {
-    const { utimes } = await import("node:fs/promises");
+  it("le hermesCommand d'un agent n'est ni lu ni exécuté (0.6.1) : aucune instance découverte par un lanceur ; il est montré « ignoré » et signalé", async () => {
     const other = join(root, "autre-racine", "beta");
     await mkdir(join(other, "profiles", "p1"), { recursive: true });
     await writeFile(join(other, "config.yaml"), "model: {}\n");
     await writeFile(join(other, "profiles", "p1", "config.yaml"), "model: {}\n");
-    const gamma = join(root, "autre-racine", "gamma");
-    await mkdir(gamma, { recursive: true });
-    await writeFile(join(gamma, "config.yaml"), "model: {}\n");
-    const launcher = join(root, "bin", "hermes-p1");
-    await writeFile(launcher, `#!/bin/bash\nexport HERMES_HOME="${join(other, "profiles", "p1")}"\nexec hermes "$@"\n`, { mode: 0o644 });
+    const marker = join(root, "LANCE");
+    const launcher = join(root, "lanceurs", "hermes-p1");
+    await mkdir(join(root, "lanceurs"), { recursive: true });
+    await writeFile(launcher, `#!/bin/bash\necho x > "${marker}"\nexport HERMES_HOME="${join(other, "profiles", "p1")}"\nexec hermes "$@"\n`, { mode: 0o755 });
     const h = await start();
     h.seed({ companies: [{ id: "co", name: "ACME" } as never], agents: [{ id: "a1", companyId: "co", name: "P1", adapterType: "hermes_local", adapterConfig: { hermesCommand: launcher }, status: "idle" } as never] });
-    const r1 = await h.getData<{ instances: { name: string }[] }>("instances", { companyId: "co" });
-    expect(r1.instances.map((i) => i.name).sort()).toEqual(["beta", "societe-a", "societe-b"]); // beta = instance du profil p1, pas p1
-    await writeFile(launcher, `#!/bin/bash\nexport HERMES_HOME="${gamma}"\n`, { mode: 0o644 });
-    const later = new Date(Date.now() + 5_000);
-    await utimes(launcher, later, later);
-    const r2 = await h.getData<{ instances: { name: string }[] }>("instances", { companyId: "co" });
-    expect(r2.instances.map((i) => i.name).sort()).toEqual(["gamma", "societe-a", "societe-b"]);
-    await writeFile(launcher, `#!/bin/bash\nexport HERMES_HOME="${gamma}"\nexport HERMES_HOME="${other}"\n`, { mode: 0o644 });
-    const later2 = new Date(Date.now() + 10_000);
-    await utimes(launcher, later2, later2);
-    const r3 = await h.getData<{ instances: { name: string }[] }>("instances", { companyId: "co" });
-    expect(r3.instances.map((i) => i.name).sort()).toEqual(["societe-a", "societe-b"]); // deux HERMES_HOME : incertain → rien d'ajouté
+    const r = await h.getData<{ instances: { name: string }[]; sync: { ignoredCommand: string | null }[]; alerts: string[] }>("instances", { companyId: "co" });
+    expect(r.instances.map((i) => i.name).sort()).toEqual(["societe-a", "societe-b"]); // beta n'est pas découverte par le lanceur
+    expect(r.sync[0]!.ignoredCommand).toBe(launcher);
+    expect(r.alerts.join(" ")).toMatch(/agent a1 \(« P1 »\) : hermesCommand .*hermes-p1 ignoré depuis 0\.6\.1/);
+    await expect(stat(marker)).rejects.toThrow(); // jamais exécuté
+    expect((await fakeCalls(join(root, "bin"))).every((c) => c.exe === fake)).toBe(true);
   });
 
-  it("santé : un agent affecté dont le lanceur passe par un lien court (`$HOME/.h/d/...`) → sockets mesurés sur ce littéral (socketBase) ; lanceur au chemin long → alerte", async () => {
-    const { symlink, utimes } = await import("node:fs/promises");
+  it("sans binaire administré valide : aucune exécution Hermes (ni synchro, ni préparation) ; un binaire shell est refusé", async () => {
+    const h = await start();
+    seedTwo(h);
+    await setCompanyInstances("A", "Societe A", [instA]);
+    await setCompanyInstances("B", "Societe B", [instB]);
+    await assignAgent({ agentId: "agent-A", companyId: "A", instanceHome: instA, profile: "assistant", name: "Assistant", assignedBy: "u" });
+    const t = JSON.parse(await readFile(assignmentsFile(), "utf8")) as Record<string, unknown>;
+    delete t["hermes"];
+    await writeFile(assignmentsFile(), JSON.stringify(t));
+    h.seed({ companies: [{ id: "A", name: "Societe A" } as never, { id: "B", name: "Societe B" } as never], agents: [{ ...(agent("agent-A", "A", "Assistant") as object), adapterConfig: { model: "gpt-6-sol", provider: "openai-codex" } } as never, agent("agent-B", "B", "Assistant")] });
+    const v = await h.getData<Data & { assignments: { binary: { ok: boolean; error: string | null } } }>("instances", { companyId: "A" });
+    expect(v.sync[0]!.error).toMatch(/binaire Hermes refusé : aucun binaire Hermes administré.*aucune écriture/);
+    expect(v.assignments.binary.ok).toBe(false);
+    await expect(h.performAction("prepare-agent", { agentId: "agent-B", companyId: "B", instanceHome: instB }, user)).rejects.toThrow(/préparation refusée : binaire Hermes refusé/);
+    await expect(stat(join(instB, "profiles"))).rejects.toThrow();
+    await expect(h.performAction("set-hermes-binary", { companyId: "A", binary: "/bin/bash" }, user)).rejects.toThrow(/binaire refusé/);
+    expect(await fakeCalls(join(root, "bin"))).toEqual([]);
+    await expect(stat(join(root, "hermes-config-set"))).rejects.toThrow();
+    // administré par l'action (board) → la synchro passe par lui
+    await h.performAction("set-hermes-binary", { companyId: "A", binary: fake }, user);
+    const v2 = await h.getData<Data>("instances", { companyId: "A" });
+    expect(v2.sync[0]!.changed).toEqual(["model.default"]);
+    const calls = await fakeCalls(join(root, "bin"));
+    expect(calls.filter((c) => c.argv[0] === "config").map((c) => [c.exe, c.HERMES_HOME])).toEqual([[fake, join(instA, "profiles", "assistant")]]);
+    expect(calls[0]!.PATH.split(":")[0]).toBe("/usr/bin"); // dossier de l'interpréteur du point d'entrée en tête
+  });
+
+  it("donnée « instances » FILTRÉE PAR ENTREPRISE : A ne voit ni l'instance, ni l'état, ni la santé, ni les erreurs de l'agent de B", async () => {
+    const h = await start();
+    seedTwo(h);
+    await setCompanyInstances("A", "Societe A", [instA]);
+    await setCompanyInstances("B", "Societe B", [instB]);
+    await mkdir(join(instB, "profiles", "assistant"), { recursive: true });
+    await writeFile(join(instB, "profiles", "assistant", "config.yaml"), "model: {}\n");
+    await assignAgent({ agentId: "agent-B", companyId: "B", instanceHome: instB, profile: "assistant", name: "Assistant", assignedBy: "u" });
+    // une erreur sur l'affectation de B (profil revendiqué deux fois, table écrite à la main)
+    const t = JSON.parse(await readFile(assignmentsFile(), "utf8")) as { agents: Record<string, unknown> };
+    t.agents["agent-B2"] = { companyId: "B", instanceHome: instB, profile: "assistant", name: "Doublon B", assignedAt: "t", assignedBy: "m" };
+    await writeFile(assignmentsFile(), JSON.stringify(t));
+    await h.getData<Data>("instances", { companyId: "B" }); // B a ouvert sa vue : son état est dans le stockage du plugin
+    const vA = await h.getData<Data & { assignments: { issues: { agents: Record<string, string>; companies: Record<string, string> } }; alerts: string[] }>("instances", { companyId: "A" });
+    const text = JSON.stringify(vA);
+    expect(vA.instances.map((i) => i.name)).toEqual(["societe-a"]);
+    expect(Object.keys(vA.states)).not.toContain("agent-B");
+    expect(vA.sync.map((s) => s.agentId)).toEqual(["agent-A"]);
+    expect(Object.keys(vA.health).some((h) => h.startsWith(instB))).toBe(false);
+    expect(vA.assignments.issues.agents).toEqual({});
+    expect(text).not.toContain("agent-B");
+    expect(text).not.toContain(instB);
+    expect(text).not.toContain("Doublon B");
+    // B voit les siennes
+    const vB = await h.getData<Data & { assignments: { issues: { agents: Record<string, string> } } }>("instances", { companyId: "B" });
+    expect(vB.assignments.issues.agents["agent-B"]).toMatch(/revendiqué/);
+    expect(vB.instances.map((i) => i.name)).toEqual(["societe-b"]);
+  });
+
+  it("référence exposée (chemin + empreintes) ; projection agents.json HYBRIDE signalée dans la vue et la santé", async () => {
+    const h = await start();
+    seedTwo(h);
+    await setCompanyInstances("A", "Societe A", [instA]);
+    type V = { assignments: { reference: { dir: string; files: { name: string; sha256: string | null }[] }; referenceLine: string; projection: string | null }; alerts: string[] };
+    const v = await h.getData<V>("instances", { companyId: "A" });
+    expect(v.assignments.reference.dir).toBe(join(root, ".config", "hermes-control"));
+    expect(v.assignments.reference.files.find((f) => f.name === "assignments.json")?.sha256).toBe(sha256(await readFile(assignmentsFile(), "utf8")));
+    expect(v.assignments.referenceLine).toMatch(/référence .*\.config\/hermes-control \(compte .*\) · assignments\.json sha256 [0-9a-f]{16}…/);
+    expect(v.assignments.projection).toBeNull();
+    // une 0.5 réinstallée écrit ses entrées plates dans la projection → hybride
+    const p = JSON.parse(await readFile(agentsMapFile(), "utf8")) as Record<string, unknown>;
+    p["agent-A"] = { name: "Assistant", instance: "societe-a", profile: "assistant", home: join(instA, "profiles", "assistant"), at: "t" };
+    await writeFile(agentsMapFile(), JSON.stringify(p));
+    const v2 = await h.getData<V>("instances", { companyId: "A" });
+    expect(v2.assignments.projection).toMatch(/HYBRIDE/);
+    expect(v2.alerts.join(" ")).toMatch(/HYBRIDE/);
+    const health = await plugin.definition.onHealth!();
+    expect(health.status).toBe("degraded");
+    expect(JSON.stringify(health)).toMatch(/HYBRIDE/);
+  });
+
+  it("santé : sockets mesurés sur le HERMES_HOME TRANSMIS (racine d'exécution courte `~/.h/d`, action set-execution-root) ; sans elle, chemin long → alerte ; alias vers une autre instance refusé", async () => {
+    const { symlink } = await import("node:fs/promises");
     const instL = join(root, "ws", "hermes", "profils", "d".repeat(30));
     const home = join(instL, "profiles", "assistant");
     await mkdir(home, { recursive: true });
@@ -333,24 +398,20 @@ exit 0
     await writeFile(join(home, "config.yaml"), "model: {}\n");
     await mkdir(join(root, ".h"));
     await symlink(instL, join(root, ".h", "d"));
-    const literal = join(root, ".h", "d", "profiles", "assistant");
-    const launcher = join(root, "bin", "hermes-assistant");
-    await writeFile(launcher, '#!/bin/bash\nexport HERMES_HOME="$HOME/.h/d/profiles/assistant"\nexec hermes "$@"\n', { mode: 0o644 });
+    await symlink(instA, join(root, ".h", "a"));
     await setCompanyInstances("co", "ACME", [instL]);
     await assignAgent({ agentId: "a1", companyId: "co", instanceHome: instL, profile: "assistant", name: "Assistant", assignedBy: "u" });
     const h = await start();
-    h.seed({ companies: [{ id: "co", name: "ACME" } as never], agents: [{ id: "a1", companyId: "co", name: "Assistant", adapterType: "hermes_local", adapterConfig: { hermesCommand: launcher }, status: "idle" } as never] });
+    h.seed({ companies: [{ id: "co", name: "ACME" } as never], agents: [{ id: "a1", companyId: "co", name: "Assistant", adapterType: "hermes_local", adapterConfig: {}, status: "idle" } as never] });
     type H = { health: Record<string, { socketPathOk: boolean; socketBase: string; alerts: string[] }> };
     const r1 = await h.getData<H>("instances", { companyId: "co" });
-    expect(r1.health[home]).toMatchObject({ socketPathOk: true, socketBase: literal, alerts: [] });
-    // le même profil, lanceur sans lien (chemin long) → refus
-    await writeFile(launcher, `#!/bin/bash\nexport HERMES_HOME="${home}"\nexec hermes "$@"\n`, { mode: 0o644 });
-    const later = new Date(Date.now() + 5_000);
-    await utimes(launcher, later, later);
+    expect(r1.health[home]?.socketPathOk).toBe(false);
+    expect(r1.health[home]?.socketBase).toBe(home);
+    expect(r1.health[home]?.alerts.join(" ")).toMatch(/socket trop long/);
+    await expect(h.performAction("set-execution-root", { companyId: "co", instanceHome: instL, executionRoot: "~/.h/a" }, user)).rejects.toThrow(/désigne .*societe-a, pas l'instance/);
+    await h.performAction("set-execution-root", { companyId: "co", instanceHome: instL, executionRoot: "~/.h/d" }, user);
     const r2 = await h.getData<H>("instances", { companyId: "co" });
-    expect(r2.health[home]?.socketPathOk).toBe(false);
-    expect(r2.health[home]?.socketBase).toBe(home);
-    expect(r2.health[home]?.alerts.join(" ")).toMatch(/socket trop long/);
+    expect(r2.health[home]).toMatchObject({ socketPathOk: true, socketBase: join(root, ".h", "d", "profiles", "assistant"), alerts: [] });
   });
 
   it("set-telegram refuse quand une unité de passerelle existe pour un autre profil, et un chemin qui n'est pas un profil connu", async () => {

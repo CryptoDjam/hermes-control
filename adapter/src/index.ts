@@ -1,26 +1,27 @@
 // Adaptateur « Hermes Control » : remplace l'adaptateur Hermes intégré de Paperclip (même type `hermes_local`),
 // identique en tout sauf :
 //  - les menus Provider / Model de l'agent proposent les providers et modèles connus de Hermes ;
-//  - l'agent tourne dans le profil Hermes qui lui est AFFECTÉ EXPLICITEMENT (table ~/.config/hermes-control/assignments.json,
-//    écrite par les actions d'administration du plugin ; agents.json n'est qu'une projection de secours à même empreinte) ;
-//    sans affectation, affectation invalide (instance plus autorisée pour l'entreprise de l'agent, profil revendiqué deux
-//    fois, instance hors racines), config.yaml absent/invalide, profil en préparation interrompue, chemin de socket trop
-//    long ou lanceur-script incertain / divergent → il REFUSE de tourner (R02b : contrôle avant réveil, même « connecté ») ;
+//  - EXÉCUTION MAÎTRISÉE (0.6.1, src/execution.ts) : l'agent tourne seulement dans le profil qui lui est AFFECTÉ
+//    EXPLICITEMENT (table <référence>/assignments.json, référence = <compte>/.config/hermes-control, la même que le plugin) ;
+//    l'adaptateur construit lui-même la commande : binaire Hermes ADMINISTRÉ (chemin absolu vérifié), HERMES_HOME =
+//    racine d'exécution littérale + profil, environnement explicite. Le `hermesCommand` de l'agent, un nom nu ou le PATH
+//    ne servent jamais à lancer ; aucun script lanceur n'est lu ni exécuté ;
+//  - tout refus de CONFIGURATION (non affecté, table refusée, affectation invalide, profil inutilisable, binaire refusé,
+//    racine d'exécution incohérente, socket trop long, -p dans extraArgs) est RENDU comme un échec `configuration_incomplete`
+//    (Paperclip 2026.1001.0 bloque alors le ticket pour un humain au lieu de replanifier) ; Hermes n'est pas appelé ;
 //  - les skills assignés à l'agent dans Paperclip sont liés dans `<profil>/skills` (là où Hermes les lit),
 //    à la synchro Paperclip et à chaque passage ; décochés → liens retirés.
 // Auteur : Cyril M — MIT.
 import { createHermesLocalServerAdapter } from "@paperclipai/hermes-paperclip-adapter";
-import { access, realpath } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { discoverLight } from "../../src/discovery.js";
-import { type HermesInstance, homeFromLauncherFile, readConfigStrict, readModelCatalogs } from "../../src/hermes.js";
+import { type HermesInstance, readModelCatalogs } from "../../src/hermes.js";
 import { agentsMapError } from "../../src/agents-map.js";
-import { type ResolvedAssignment, assignmentsFile, isApprovedBinary, resolveAssignment } from "../../src/assignments.js";
-import { checkSocketPaths, socketPathAlert } from "../../src/health.js";
+import { assignmentsFile, resolveAssignment } from "../../src/assignments.js";
+import { describeBinary } from "../../src/binary.js";
+import { type ExecutionPlan, HermesControlRefusal, buildAgentEnv, checkExtraArgs, planExecution } from "../../src/execution.js";
 import { slug } from "../../src/match.js";
-import { profileUsability } from "../../src/prepare.js";
+import { describeReference, referenceInfo } from "../../src/reference.js";
 import { exists, readWorkspace } from "../../src/workspace.js";
 import { reconcileIntoProfile, snapshotForProfile } from "./skills.js";
 
@@ -32,22 +33,9 @@ let lightCache: { at: number; value: HermesInstance[] } | null = null;
 
 async function instances(): Promise<HermesInstance[]> {
   if (lightCache && Date.now() - lightCache.at < LIGHT_TTL_MS) return lightCache.value;
-  const value = await discoverLight([], await hermesBinary());
+  const value = await discoverLight([]); // lecture seule : aucun appel à Hermes
   lightCache = { at: Date.now(), value };
   return value;
-}
-
-/** Binaire hermes : HERMES_CONTROL_HERMES_BIN (chemin explicite), sinon ~/.local/bin/hermes si présent, sinon « hermes » (PATH de Paperclip). */
-async function hermesBinary(): Promise<string> {
-  const explicit = process.env["HERMES_CONTROL_HERMES_BIN"]?.trim();
-  if (explicit) return explicit;
-  const local = join(homedir(), ".local", "bin", "hermes");
-  try {
-    await access(local, fsConstants.X_OK);
-    return local;
-  } catch {
-    return "hermes";
-  }
 }
 
 /** Providers réellement configurés dans les profils Hermes (ordre : le plus fréquent d'abord). */
@@ -83,46 +71,29 @@ async function hermesModels(list: HermesInstance[]): Promise<{ id: string; label
   return out;
 }
 
-async function realOrResolved(p: string): Promise<string> {
-  return (await realpath(p).catch(() => null)) ?? resolve(p);
-}
+/** Code d'erreur que Paperclip 2026.1001.0 traite comme NON réessayable (recovery → ticket bloqué pour un humain). */
+export const REFUSAL_ERROR_CODE = "configuration_incomplete";
 
-/**
- * Affectation d'un agent, contrôlée AVANT tout passage : entrée valide dans la table (entreprise de l'agent, instance autorisée,
- * profil non revendiqué, instance dans une racine connue), profil présent (config.yaml) et lisible, profil utilisable (aucune
- * préparation interrompue), chemins de sockets de la version épinglée sous la limite, et lanceur cohérent : un binaire Hermes
- * approuvé est accepté tel quel ; un SCRIPT doit se lire sans incertitude et viser exactement le profil affecté.
- */
-async function assignmentOf(agent: { id?: string; name: string; companyId?: string | null }, command: string | null): Promise<ResolvedAssignment> {
-  const r = await resolveAssignment(agent.id ?? "", { companyId: agent.companyId ?? null });
-  const name = agent.name;
-  if (!r.ok) {
-    const mapErr = await agentsMapError();
-    throw new Error(`[hermes-control] « ${name} » : ${r.reason}${mapErr ? ` — ${mapErr}` : ""} ; aucun passage.`);
-  }
-  const rec = r.ok;
-  const label = `${rec.instanceHome.split("/").pop()}/${rec.profile}`;
-  if (!(await exists(join(rec.home, "config.yaml")))) {
-    throw new Error(`[hermes-control] « ${name} » : affecté à ${label} mais ${rec.home}/config.yaml n'existe pas (profil à préparer : page Hermes → « Préparer l'agent ») ; aucun passage.`);
-  }
-  const { error } = await readConfigStrict(rec.home);
-  if (error) throw new Error(`[hermes-control] « ${name} » : ${rec.home}/${error} ; aucun passage tant que le fichier n'est pas réparé.`);
-  const unusable = await profileUsability(rec.instanceHome, rec.profile);
-  if (unusable) throw new Error(`[hermes-control] « ${name} » : ${unusable} ; aucun passage.`);
-  // Hermes lie ses sockets sur HERMES_HOME tel que reçu (sans realpath) : pour un script lanceur, c'est le HERMES_HOME
-  // littéral du script qui compte (un lien court vers une racine profonde est accepté) ; pour un binaire, le home affecté.
-  let socketBase = rec.home;
-  if (command && !isApprovedBinary(command, { approvedBinaries: r.approvedBinaries })) {
-    // un script lanceur : toute incertitude est un refus, jamais une conformité
-    const fromLauncher = await homeFromLauncherFile(command);
-    if (fromLauncher.home === null) throw new Error(`[hermes-control] « ${name} » : lanceur incertain, refus : ${fromLauncher.error}. Déclare un binaire Hermes approuvé (HERMES_CONTROL_HERMES_BIN ou approvedBinaries dans ${assignmentsFile()}) ou corrige le lanceur.`);
-    const [a, b] = await Promise.all([realOrResolved(rec.home), realOrResolved(fromLauncher.home)]);
-    if (a !== b) throw new Error(`[hermes-control] « ${name} » : affectation (table) ≠ lanceur : ${a} vs ${b} (${command}) ; corrige l'un ou l'autre.`);
-    socketBase = fromLauncher.literal;
-  }
-  const sock = await checkSocketPaths(socketBase);
-  if (!sock.socketPathOk) throw new Error(`[hermes-control] « ${name} » : ${socketPathAlert(sock)} ; aucun passage (le watchdog de Hermes ne pourrait pas ouvrir son socket).`);
-  return rec;
+/** Résultat d'échec rendu à Paperclip pour un refus de configuration (pas d'exception : une exception devient « adapter_failed », réessayé). */
+function refusalResult(agent: { id?: string; name: string; companyId?: string | null }, refusal: HermesControlRefusal, message: string) {
+  return {
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    errorMessage: message,
+    errorCode: REFUSAL_ERROR_CODE,
+    resultJson: {
+      configurationIncomplete: {
+        reason: `hermes_control_${refusal.kind}`,
+        companyId: agent.companyId ?? null,
+        agentId: agent.id ?? null,
+        // empreinte stable : un même refus répété réutilise la même action de reprise côté Paperclip
+        fingerprint: `hermes_control:${refusal.kind}:${agent.id ?? "?"}`,
+        missingBindings: [],
+      },
+      hermesControl: { refused: true, kind: refusal.kind },
+    },
+  };
 }
 
 /** `base` injectable (tests) : par défaut l'adaptateur Hermes officiel. */
@@ -130,16 +101,26 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
   const execute: Base["execute"] = async (ctx) => {
     const c = ctx as unknown as { config?: AnyRecord; onLog?: (stream: "stdout" | "stderr", text: string) => Promise<void> | void; agent: { id?: string; name: string; companyId?: string | null; adapterConfig?: unknown } };
     const config: AnyRecord = { ...((c.config ?? (c.agent.adapterConfig as AnyRecord | undefined)) ?? {}) };
-    const command = typeof config["hermesCommand"] === "string" && (config["hermesCommand"] as string).trim() ? (config["hermesCommand"] as string).trim() : null;
-    let m: ResolvedAssignment;
+    let plan: ExecutionPlan;
     try {
-      m = await assignmentOf(c.agent, command);
+      const badArgs = checkExtraArgs(config["extraArgs"]);
+      if (badArgs) throw new HermesControlRefusal("arguments", badArgs);
+      plan = await planExecution(c.agent);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      await c.onLog?.("stderr", msg + "\n");
-      throw e;
+      if (e instanceof HermesControlRefusal) {
+        const mapErr = await agentsMapError().catch(() => null);
+        const msg = `[hermes-control] « ${c.agent.name} » : refus (${e.kind}) : ${e.message}${mapErr ? ` — ${mapErr}` : ""} ; Hermes n'est pas lancé.`;
+        await c.onLog?.("stderr", msg + "\n");
+        return refusalResult(c.agent, e, msg) as Awaited<ReturnType<Base["execute"]>>;
+      }
+      throw e; // erreur inattendue (disque, etc.) : temporaire, Paperclip peut réessayer
     }
-    const env = { ...((config["env"] as AnyRecord | undefined) ?? {}), HERMES_HOME: m.home };
+    const m = plan.assignment;
+    // la commande : le binaire ADMINISTRÉ, jamais celui de l'agent
+    const ignored = [config["hermesCommand"], config["command"]].filter((x) => typeof x === "string" && (x as string).trim() && x !== plan.binary.path) as string[];
+    config["hermesCommand"] = plan.binary.path;
+    delete config["command"];
+    const { env, dropped } = buildAgentEnv(config["env"], plan);
     config["env"] = env;
     // pas de working directory choisi dans Paperclip → le dossier de l'agent dans le dossier de travail commun, s'il existe
     if (typeof config["cwd"] !== "string" || !(config["cwd"] as string).trim()) {
@@ -150,8 +131,9 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
         await c.onLog?.("stdout", `[hermes-control] working directory = ${dir}\n`);
       }
     }
-    if (typeof config["hermesCommand"] !== "string" || !(config["hermesCommand"] as string).trim()) config["hermesCommand"] = await hermesBinary();
-    await c.onLog?.("stdout", `[hermes-control] ${c.agent.name} → Hermes ${m.instanceHome.split("/").pop()}/${m.profile} (affectation explicite, ${m.source === "table" ? "table" : "projection à même empreinte"}, par ${m.assignedBy} le ${m.assignedAt}) · HERMES_HOME=${m.home}\n`);
+    await c.onLog?.("stdout", `[hermes-control] ${c.agent.name} → Hermes ${m.instanceHome.split("/").pop()}/${m.profile} (affectation explicite, ${m.source === "table" ? "table" : "projection à même empreinte"}, par ${m.assignedBy} le ${m.assignedAt}) · HERMES_HOME=${plan.hermesHome}${plan.hermesHome !== m.home ? ` (= ${m.home})` : ""} · socket max ${plan.socket.socketPathBytes} octets · binaire ${describeBinary(plan.binary)}\n`);
+    if (ignored.length) await c.onLog?.("stdout", `[hermes-control] commande de l'agent ignorée (${ignored.join(", ")}) : seul le binaire administré est lancé\n`);
+    if (dropped.length) await c.onLog?.("stdout", `[hermes-control] env de l'agent : ${dropped.join(", ")} ignoré(s) (administré par Hermes Control)\n`);
     if (Object.prototype.hasOwnProperty.call(config, "paperclipRuntimeSkills")) {
       try {
         const r = await reconcileIntoProfile(config, m.home);
@@ -186,9 +168,17 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
       level: list.length ? "info" : "error",
       message: list.length ? `Hermes Control : ${list.length} instance(s) trouvée(s)` : "Hermes Control : aucune instance Hermes trouvée",
       detail: list.length ? summary : null,
-      hint: list.length ? `Un agent tourne seulement dans le profil qui lui est affecté explicitement (${assignmentsFile()}, écrit par les actions d'affectation du plugin Hermes Control).` : "Ajoute le dossier des instances dans ~/.config/hermes-control/roots (une ligne par dossier).",
+      hint: list.length ? `Un agent tourne seulement dans le profil qui lui est affecté explicitement (${assignmentsFile()}, écrit par les actions d'affectation du plugin Hermes Control), avec le binaire Hermes administré dans cette table.` : "Ajoute le dossier des instances dans <référence>/roots (une ligne par dossier).",
     });
-    if (!list.length) result.status = "fail";
+    const ref = await referenceInfo();
+    result.checks.push({
+      code: "hermes_control.reference",
+      level: ref.legacyEnv.length ? "error" : "info",
+      message: `Hermes Control : ${describeReference(ref)}`,
+      detail: null,
+      hint: ref.legacyEnv.length ? `Retire ${ref.legacyEnv.join(", ")} de l'environnement du service : plus lues depuis 0.6.1.` : "Plugin et adaptateur lisent ce même dossier (calculé depuis le compte Unix, pas depuis l'environnement).",
+    });
+    if (!list.length || ref.legacyEnv.length) result.status = "fail";
     return result;
   };
 

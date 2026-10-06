@@ -9,13 +9,13 @@ interface Profile { name: string; home: string; description: string | null; mode
 interface Instance { name: string; home: string; dashboardUrl: string | null; profiles: Profile[]; errors24h: number; lastError: string | null }
 interface Assignment { instanceHome: string; profile: string; assignedAt: string; assignedBy: string }
 interface Suggestion { instance: string; instanceHome: string; profile: string; by: "profile-name" | "description" }
-interface Sync { agentId: string; companyId: string; agentName: string; instance: string | null; profile: string | null; home: string | null; assignment: Assignment | null; suggestion: Suggestion | null; want: { provider: string | null; model: string | null; thinking: string | null }; cwd: string | null; changed: string[]; error: string | null; prepared: string[] | null; at: string }
+interface Sync { agentId: string; companyId: string; agentName: string; instance: string | null; profile: string | null; home: string | null; assignment: Assignment | null; suggestion: Suggestion | null; want: { provider: string | null; model: string | null; thinking: string | null }; cwd: string | null; changed: string[]; error: string | null; prepared: string[] | null; ignoredCommand?: string | null; at: string }
 interface Workspace { root: string; profils: string; skills: string; modeles: string; agents: string }
 type AgentState = "installed" | "connected" | "synced";
 interface Health { socketPathBytes: number; socketPathOk: boolean; longest: string; socketBase: string; skills: { name: string; yamlOk: boolean; hiddenByPlatforms: boolean }[]; configError: string | null; alerts: string[] }
 interface Company { name: string; instances: string[] }
-interface Assignments { file: string; error: string | null; company: Company | null; issues: { companies: Record<string, string>; agents: Record<string, string> } }
-interface Data { instances: Instance[]; sync: Sync[]; workspace: Workspace | null; telegram: Record<string, boolean>; health: Record<string, Health>; states: Record<string, AgentState>; assignments: Assignments }
+interface Assignments { file: string; error: string | null; company: Company | null; issues: { companies: Record<string, string>; agents: Record<string, string>; instances?: Record<string, string> }; referenceLine?: string; binary?: { ok: boolean; description: string | null; error: string | null }; projection?: string | null }
+interface Data { instances: Instance[]; sync: Sync[]; workspace: Workspace | null; telegram: Record<string, boolean>; health: Record<string, Health>; states: Record<string, AgentState>; assignments: Assignments; alerts?: string[] }
 
 const STATE_LABEL: Record<AgentState, string> = { installed: "installé", connected: "connecté", synced: "connecté et synchronisé" };
 
@@ -76,7 +76,7 @@ function CompanyInstances({ companyId, all, company, onDone }: { companyId: stri
   return (
     <div style={S.card}>
       <div style={S.row}><strong style={{ fontSize: 16 }}>Instances autorisées de l'entreprise</strong><span style={S.muted}>un agent ne peut être affecté qu'à une instance cochée ici ; rien n'est déduit du nom de l'entreprise</span></div>
-      {!all.length && <div style={S.muted}>aucune instance découverte (~/.config/hermes-control/roots)</div>}
+      {!all.length && <div style={S.muted}>aucune instance découverte (&lt;référence&gt;/roots)</div>}
       <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
         {all.map((i) => (
           <label key={i.home} style={S.row}><input type="checkbox" checked={chosen.includes(i.home)} onChange={() => toggle(i.home)} /><strong>{i.name}</strong><span style={{ ...S.muted, ...S.code }}>{i.home}</span>{company?.instances.includes(i.home) && <span style={S.muted}>(autorisée)</span>}</label>
@@ -171,7 +171,14 @@ export function HermesPage() {
     <div style={S.wrap}>
       {data.assignments?.error && <div style={{ ...S.card, borderColor: "#ef4444", color: "#ef4444" }}>Table des affectations refusée : {data.assignments.error} — aucune écriture tant que {data.assignments.file} n'est pas réparé.</div>}
       <div style={S.card}>
-        <div style={S.row}><strong style={{ fontSize: 16 }}>Dossiers communs</strong>{!ws && <span style={S.muted}>aucun dossier de travail déclaré (~/.config/hermes-control/workspace) : « Préparer l'agent » est indisponible</span>}</div>
+        <div style={S.row}><strong style={{ fontSize: 16 }}>Référence et exécution</strong><span style={S.muted}>plugin et adaptateur lisent ce même dossier ; seul le binaire administré est lancé</span></div>
+        <div style={{ ...S.muted, ...S.code, marginTop: 6 }}>{data.assignments?.referenceLine ?? data.assignments?.file}</div>
+        <div style={{ marginTop: 6, fontSize: 12, color: data.assignments?.binary?.ok ? "inherit" : "#ef4444" }}>binaire Hermes : {data.assignments?.binary?.ok ? <span style={S.code}>{data.assignments.binary.description}</span> : `refusé — ${data.assignments?.binary?.error ?? "?"} (aucun passage, aucune écriture Hermes)`}</div>
+        {data.assignments?.projection && <div style={{ color: "#eab308", fontSize: 12, marginTop: 6 }}>{data.assignments.projection}</div>}
+        {(data.alerts ?? []).map((a, i) => <div key={i} style={{ color: "#ef4444", fontSize: 12, marginTop: 4 }}>{a}</div>)}
+      </div>
+      <div style={S.card}>
+        <div style={S.row}><strong style={{ fontSize: 16 }}>Dossiers communs</strong>{!ws && <span style={S.muted}>aucun dossier de travail déclaré (&lt;référence&gt;/workspace) : « Préparer l'agent » est indisponible</span>}</div>
         {ws && (
           <table style={{ ...S.table, marginTop: 8 }}><tbody>
             <tr><td style={S.td}>Dossier de travail</td><td style={{ ...S.td, ...S.code }}>{ws.root}</td></tr>
@@ -193,7 +200,7 @@ export function HermesPage() {
             <tbody>
               {data.sync.map((s) => (
                 <tr key={s.agentId}>
-                  <td style={S.td}><strong>{s.agentName}</strong>{s.prepared?.length ? " ✦" : ""}<div style={{ ...S.muted, ...S.code }}>{s.agentId}</div></td>
+                  <td style={S.td}><strong>{s.agentName}</strong>{s.prepared?.length ? " ✦" : ""}<div style={{ ...S.muted, ...S.code }}>{s.agentId}</div>{s.ignoredCommand && <div style={{ color: "#eab308", fontSize: 12 }}>hermesCommand ignoré : <span style={S.code}>{s.ignoredCommand}</span></div>}</td>
                   <td style={S.td}><AgentAssignment s={s} companyId={companyId} company={company} instances={data.instances} onDone={refresh} /></td>
                   <td style={S.td}>{data.states?.[s.agentId] ? <State state={data.states[s.agentId]!} /> : <span style={S.muted}>—</span>}</td>
                   <td style={S.td}>{s.assignment ? (s.error ? <span style={{ color: "#ef4444", fontSize: 12 }}>aucune écriture</span> : s.changed.length ? <span style={S.muted}>écrit : {s.changed.join(", ")}</span> : <span style={S.muted}>à jour</span>) : <span style={S.muted}>aucune écriture</span>}{s.cwd && <div style={{ ...S.muted, ...S.code }}>dossier : {s.cwd}</div>}</td>

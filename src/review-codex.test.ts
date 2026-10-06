@@ -1,6 +1,8 @@
 // Les six sondes de relecture de Codex (06/10/2026, preuves-codex-hc06-2026-10-06/review.test.ts), reprises UNE PAR UNE avec
 // les attentes INVERSÉES : là où la sonde constatait le défaut de la 0.6.0 (f5d4327), ce test exige le refus ou le nettoyage.
 // Même montage que les sondes (HOME temporaire, faux clone, lanceurs non exécutables, espion à la place de base.execute).
+// 0.6.1 : les sondes n°2 et n°3 (lanceurs) sont durcies : un lanceur n'est plus ni lu ni lancé ; la commande transmise
+// est toujours le binaire administré et HERMES_HOME celui de l'affectation, quel que soit le hermesCommand de l'agent.
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -12,22 +14,22 @@ import manifest from "./manifest.js";
 import { assignmentsFile, readAssignments, resolveAssignment, setCompanyInstances } from "./assignments.js";
 import { agentsMapFile, readProjection } from "./agents-map.js";
 import { createServerAdapter } from "../adapter/src/index.js";
-import { homeFromLauncherFile } from "./hermes.js";
+import { makeFakeHermes, writeRoots } from "./testkit.js";
+import { setHermesBinary } from "./assignments.js";
 import { EMPTY_ENV, prepareAgent, preparingFile, profileUsability } from "./prepare.js";
 import { checkProfile } from "./health.js";
 import { ownerFile, readOwner, withDirLock } from "./lock.js";
 
 let root: string;
 let profile: string;
+let fakeBin: string;
 const saved = new Map<string, string | undefined>();
 function env(key: string, value: string) { saved.set(key, process.env[key]); process.env[key] = value; }
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "hc-r-")); // court : le contrôle de socket (≤ 100 octets) doit passer pour le cas positif
   env("HOME", root);
-  env("HERMES_CONTROL_ROOTS", join(root, "instances"));
-  const fake = join(root, "fake-hermes");
-  await writeFile(fake, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-  env("HERMES_CONTROL_HERMES_BIN", fake);
+  await writeRoots(join(root, "instances"));
+  fakeBin = await makeFakeHermes(join(root, "hb"));
   profile = join(root, "instances", "societe-a", "profiles", "assistant");
   await mkdir(profile, { recursive: true });
   await writeFile(join(root, "instances", "societe-a", "config.yaml"), "model: {}\n");
@@ -60,7 +62,9 @@ it("sonde n°1 inversée : ouvrir la vue de B n'affecte PAS son Assistant au pro
   const calls: unknown[] = [];
   const real = createServerAdapter();
   const adapter = createServerAdapter({ ...real, execute: async (ctx: unknown) => { calls.push(ctx); return {} as never; } });
-  await expect(adapter.execute({ agent: { id: "agent-B", companyId: "B", name: "Assistant", adapterConfig: {} }, config: {}, onLog: async () => {} } as never)).rejects.toThrow(/non affecté/);
+  const refused = (await adapter.execute({ agent: { id: "agent-B", companyId: "B", name: "Assistant", adapterConfig: {} }, config: {}, onLog: async () => {} } as never)) as { errorCode?: string; errorMessage?: string };
+  expect(refused.errorCode).toBe("configuration_incomplete");
+  expect(refused.errorMessage).toMatch(/non affecté/);
   expect(calls).toEqual([]);
 });
 
@@ -70,33 +74,29 @@ async function runWithLauncher(contents: string) {
   await setCompanyInstances("c", "Societe", [join(root, "instances", "societe-a")]);
   const { assignAgent } = await import("./assignments.js");
   await assignAgent({ agentId: "agent", companyId: "c", instanceHome: join(root, "instances", "societe-a"), profile: "assistant", name: "Assistant", assignedBy: "user:u1" });
-  const calls: unknown[] = [];
+  await setHermesBinary({ binary: fakeBin });
+  const calls: { config: { hermesCommand: string; env: Record<string, string> } }[] = [];
   const real = createServerAdapter();
-  const adapter = createServerAdapter({ ...real, execute: async (ctx: unknown) => { calls.push(ctx); return {} as never; } });
+  const adapter = createServerAdapter({ ...real, execute: async (ctx: unknown) => { calls.push(ctx as never); return {} as never; } });
   const run = adapter.execute({ agent: { id: "agent", companyId: "c", name: "Assistant", adapterConfig: {} }, config: { hermesCommand: launcher, cwd: root }, onLog: async () => {} } as never);
   return { calls, launcher, run };
 }
 
-it("sonde n°2 inversée : un lanceur au home non résolu N'EST PAS transmis à execute (refus explicite)", async () => {
+it("sonde n°2 durcie (0.6.1) : un lanceur au home non résolu n'est ni lu ni transmis ; seul le binaire administré part, sur le profil affecté", async () => {
   const { calls, launcher, run } = await runWithLauncher('#!/bin/sh\nexport HERMES_HOME="$UNKNOWN_REVIEW_ROOT/ailleurs"\nexec hermes "$@"\n');
-  expect((await homeFromLauncherFile(launcher)).error).toMatch(/non résolu/);
-  await expect(run).rejects.toThrow(/lanceur incertain, refus/);
-  expect(calls).toHaveLength(0);
-});
-
-it("sonde n°3 inversée : un second export HERMES_HOME divergent est REFUSÉ (pas de premier export retenu)", async () => {
-  const { calls, launcher, run } = await runWithLauncher(`#!/bin/sh\nexport HERMES_HOME="${profile}"\nexport HERMES_HOME="${join(root, "autre-profil")}"\nexec hermes "$@"\n`);
-  const parsed = await homeFromLauncherFile(launcher);
-  expect(parsed.home).toBeNull();
-  expect(parsed.error).toMatch(/plusieurs HERMES_HOME/);
-  await expect(run).rejects.toThrow(/plusieurs HERMES_HOME/);
-  expect(calls).toHaveLength(0);
-});
-
-it("sonde n°3 bis (cas positif) : un seul HERMES_HOME identique à l'affectation → transmis à execute", async () => {
-  const { calls, run } = await runWithLauncher(`#!/bin/sh\nexport HERMES_HOME="${profile}"\nexec hermes "$@"\n`);
   await run;
   expect(calls).toHaveLength(1);
+  expect(calls[0]!.config.hermesCommand).toBe(fakeBin);
+  expect(calls[0]!.config.hermesCommand).not.toBe(launcher);
+  expect(calls[0]!.config.env["HERMES_HOME"]).toBe(profile);
+});
+
+it("sonde n°3 durcie (0.6.1) : un second export HERMES_HOME divergent est sans effet — le lanceur n'est pas lancé", async () => {
+  const { calls, launcher, run } = await runWithLauncher(`#!/bin/sh\nexport HERMES_HOME="${profile}"\nexport HERMES_HOME="${join(root, "autre-profil")}"\nexec hermes "$@"\n`);
+  await run;
+  expect(calls[0]!.config.hermesCommand).toBe(fakeBin);
+  expect(calls[0]!.config.hermesCommand).not.toBe(launcher);
+  expect(calls[0]!.config.env["HERMES_HOME"]).toBe(profile);
 });
 
 it("sonde n°4 inversée : un clone partiel en échec NE LAISSE PAS le marqueur factice dans .env ; le profil est inutilisable jusqu'à la reprise", async () => {

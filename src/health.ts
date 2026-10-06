@@ -28,7 +28,7 @@ export interface SocketPathCheck {
   socketPathOk: boolean;
   longest: string; // le chemin qui donne la mesure
   sockets: string[]; // fichiers *.sock présents (relatifs à home : « x.sock », « state/y.sock »)
-  socketBase: string; // le dossier mesuré : HERMES_HOME littéral du lanceur quand il est connu, sinon le home du profil
+  socketBase: string; // le dossier mesuré : HERMES_HOME littéral transmis (racine d'exécution administrée) pour un profil affecté, sinon le home du profil
 }
 
 export interface ProfileHealth extends SocketPathCheck {
@@ -115,7 +115,7 @@ export function socketPathAlert(c: SocketPathCheck): string {
 }
 
 /**
- * `socketBase` : le HERMES_HOME littéral (sans realpath) que reçoit Hermes, quand le lanceur de l'agent affecté le donne —
+ * `socketBase` : le HERMES_HOME littéral (sans realpath) que reçoit Hermes, construit depuis la racine d'exécution administrée —
  * Hermes lie ses sockets sur ce chemin tel quel (un lien court vers une racine profonde est donc accepté). Sinon `home`.
  */
 export async function checkProfile(home: string, socketBase: string = home): Promise<ProfileHealth> {

@@ -12,7 +12,7 @@
 // (`prepareAgent` relancé termine le nettoyage). Un profil sans ces marqueurs (fait à la main) n'est jamais vidé.
 import { lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
-import { assertSafeName, profileCreate, profileHome } from "./hermes.js";
+import { type HermesBin, assertSafeName, profileCreate, profileHome } from "./hermes.js";
 import { withDirLock } from "./lock.js";
 import { slug } from "./match.js";
 import { type Workspace, exists } from "./workspace.js";
@@ -22,7 +22,7 @@ export interface PrepareInput {
   instanceHome: string; // instance Hermes de l'entreprise (racine)
   agentName: string; // nom Paperclip (« Apolline M »)
   title?: string | null; // titre Paperclip (« Directrice marketing »)
-  binary?: string;
+  binary?: HermesBin; // binaire administré et vérifié (sans lui, aucun clone possible)
   entreprise?: string | null;
 }
 
@@ -253,7 +253,7 @@ export async function prepareAgent(input: PrepareInput): Promise<PrepareResult> 
 }
 
 async function prepareLocked(input: PrepareInput, s: string): Promise<PrepareResult> {
-  const binary = input.binary ?? "hermes";
+  const binary = input.binary ?? null;
   const created: string[] = [];
   const warnings: string[] = [];
   const home = profileHome(input.instanceHome, s);

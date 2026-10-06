@@ -1,6 +1,6 @@
 // Paperclip est le maître : provider / modèle / thinking choisis dans le menu de l'agent sont écrits
 // dans le config.yaml du profil Hermes trouvé par le nom. On n'écrit que ce qui change.
-import { hermes, readConfigStrict } from "./hermes.js";
+import { type HermesBin, hermes, readConfigStrict } from "./hermes.js";
 
 export interface Desired {
   provider: string | null; // adapterConfig.provider
@@ -48,7 +48,7 @@ export function unreadableConfigError(configError: string): string {
 
 /** Compare le config.yaml du profil aux valeurs Paperclip et écrit les différences avec `hermes config set`.
  *  Un config.yaml invalide → aucun `hermes config set` (le fichier n'est pas touché). */
-export async function syncProfile(home: string, want: Desired, binary = "hermes"): Promise<SyncResult> {
+export async function syncProfile(home: string, want: Desired, binary: HermesBin): Promise<SyncResult> {
   const res: SyncResult = { changed: [], skipped: [], error: null };
   const { cfg, error } = await readConfigStrict(home);
   if (error) return { ...res, error: unreadableConfigError(error) };

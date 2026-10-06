@@ -2,7 +2,7 @@
 // Hermes lit TELEGRAM_BOT_TOKEN dans $HERMES_HOME/.env ; la passerelle (`hermes gateway`) est installée pour ce profil.
 import { chmod, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { hermes } from "./hermes.js";
+import { type HermesBin, hermes } from "./hermes.js";
 import { userHome } from "./paths.js";
 
 const TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,64}$/;
@@ -102,7 +102,7 @@ export async function assertGatewayFree(home: string, knownProfiles: string[]): 
 }
 
 /** Installe et démarre la passerelle Hermes de ce profil (service utilisateur), sans shell. */
-export async function startGateway(home: string, binary = "hermes"): Promise<string> {
+export async function startGateway(home: string, binary: HermesBin): Promise<string> {
   try {
     return await hermes(home, ["gateway", "install", "--start-now", "--start-on-login"], binary, 120_000);
   } catch (e) {
