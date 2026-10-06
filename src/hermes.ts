@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, realpath, stat, readdir, access } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import YAML from "yaml";
 
@@ -96,11 +96,21 @@ export async function resolveHomeFromLauncher(launcher: string): Promise<string 
 const LAUNCHER_MAX_BYTES = 64 * 1024;
 const ASSIGN_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 
-function unquote(v: string): string {
-  const t = v.trim();
-  const q = /^"([^"]*)"|^'([^']*)'/.exec(t); // valeur entre guillemets (un commentaire peut suivre)
-  if (q) return q[1] ?? q[2] ?? "";
-  return t.split(/\s+#/)[0]!.trim();
+/**
+ * Valeur d'une affectation shell : apostrophes = littéral (mais une apostrophe qui contient `$` n'est pas résoluble
+ * → null) ; guillemets = expansion ; sans guillemets, un mot suivi d'autres mots est une commande préfixée
+ * (`HERMES_HOME=/x exec …`) → "ignore" (la ligne ne compte pas).
+ */
+function literalValue(raw: string): { value: string; quoted: "single" | "double" | null } | "ignore" | null {
+  const t = raw.trim();
+  const sq = /^'([^']*)'(?:\s*(#.*)?)?$/.exec(t);
+  if (sq) return sq[1]!.includes("$") ? null : { value: sq[1]!, quoted: "single" };
+  const dq = /^"([^"]*)"(?:\s*(#.*)?)?$/.exec(t);
+  if (dq) return { value: dq[1]!, quoted: "double" };
+  if (/^["']/.test(t)) return null; // guillemet ouvert, non fermé sur la ligne
+  const word = t.split(/\s+#/)[0]!.trim();
+  if (/\s/.test(word)) return "ignore"; // `VAR=x commande …`
+  return { value: word, quoted: null };
 }
 
 /** Remplace $VAR / ${VAR} / ~ par les valeurs connues ; null si une variable reste inconnue ou si la valeur n'est pas littérale. */
@@ -122,6 +132,7 @@ function expand(value: string, vars: Record<string, string>): string | null {
  * affectée littéralement plus haut dans le fichier. Sinon null (fichier absent, trop gros, binaire, ou valeur non résolue).
  */
 export async function homeFromLauncherFile(launcher: string): Promise<string | null> {
+  if (!isAbsolute(launcher)) return null; // un lanceur relatif dépend du cwd de Paperclip : refusé
   let path = resolve(launcher);
   try {
     path = await realpath(path); // les lanceurs font `readlink -f "$0"`
@@ -142,8 +153,14 @@ export async function homeFromLauncherFile(launcher: string): Promise<string | n
     const m = ASSIGN_RE.exec(line);
     if (!m) continue;
     const [, name, raw] = m as unknown as [string, string, string];
-    const value = expand(unquote(raw), vars);
-    if (name === "HERMES_HOME") return value && value.startsWith("/") ? resolve(value) : null;
+    const lit = literalValue(raw);
+    if (lit === "ignore") continue;
+    const value = lit === null ? null : lit.quoted === "single" ? lit.value : expand(lit.value, vars);
+    if (name === "HERMES_HOME") {
+      if (!value || !value.startsWith("/")) return null;
+      const home = resolve(value);
+      return (await realpath(home).catch(() => null)) ?? home; // chemin réel quand le dossier existe
+    }
     if (value !== null) vars[name] = value;
   }
   return null;
@@ -181,7 +198,7 @@ export async function readConfigStrict(home: string): Promise<{ cfg: Record<stri
   }
   let doc: unknown;
   try {
-    doc = YAML.parse(text);
+    doc = YAML.parse(text, { uniqueKeys: false }); // comme safe_load Python : clés dupliquées tolérées
   } catch (e) {
     return { cfg: {}, error: `config.yaml invalide : ${(e as Error).message.split("\n")[0]}` };
   }
@@ -200,10 +217,11 @@ async function readDescription(home: string): Promise<string | null> {
   }
 }
 
+/** Les négations d'abord : « not logged in », « invalid », « expired » contiennent les mots positifs. */
 export function parseAuthStatus(text: string): HermesProfile["authStatus"] {
   const t = text.toLowerCase();
+  if (/not logged|logged out|no .*credentials|invalid|expired|not authenticated/.test(t)) return "logged_out";
   if (/logged in|authenticated|valid/.test(t)) return "logged_in";
-  if (/logged out|no .*credentials|not logged/.test(t)) return "logged_out";
   return "unknown";
 }
 

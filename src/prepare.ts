@@ -4,9 +4,10 @@
 // Jamais de suppression. Pas de shell : `hermes profile create` via execFile.
 // Le profil est préparé avec un `.env` VIDE (R02a : `--clone` copie les clés et le jeton Telegram de l'instance ; on les retire),
 // sous un verrou par agent (`<instance>/.hermes-control/prepare-<slug>.lock`) : deux déclencheurs à la fois → une seule préparation.
-import { chmod, lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import { assertSafeName, profileCreate, profileHome } from "./hermes.js";
+import { withDirLock } from "./lock.js";
 import { slug } from "./match.js";
 import { type Workspace, exists } from "./workspace.js";
 
@@ -69,41 +70,40 @@ statut: préparé automatiquement par Hermes Control le {{date}}
 
 export const EMPTY_ENV = "# Rendu par le gestionnaire de connexions ; aucune clé héritée de l'instance.\n";
 const PREPARE_LOCK_STALE_MS = 10 * 60 * 1000;
+// marqueurs dans <profil>/.hermes-control/ : créé par nous, .env vidé (R02a idempotent)
+const MARK_PREPARED = "prepared-by-hermes-control";
+const MARK_ENV_CLEANED = "env-cleaned";
 
-/** Remplace <home>/.env par le fichier vide (en-tête seul), mode 600 : aucune clé héritée du clone. */
+/** Remplace <home>/.env par le fichier vide (en-tête seul), mode 600 ; le fichier est retiré puis recréé (`wx`) : jamais à travers un lien. */
 export async function writeEmptyEnv(home: string): Promise<void> {
   const file = join(home, ".env");
-  await writeFile(file, EMPTY_ENV, { mode: 0o600 });
-  await chmod(file, 0o600);
+  await rm(file, { force: true });
+  await writeFile(file, EMPTY_ENV, { flag: "wx", mode: 0o600 });
+}
+
+async function hasMark(home: string, mark: string): Promise<boolean> {
+  return exists(join(home, ".hermes-control", mark));
+}
+
+async function setMark(home: string, mark: string): Promise<void> {
+  await mkdir(join(home, ".hermes-control"), { recursive: true });
+  await writeFile(join(home, ".hermes-control", mark), `${new Date().toISOString()}\n`);
+}
+
+/** Vide le .env et pose le marqueur. */
+async function cleanEnv(home: string, created: string[]): Promise<void> {
+  await writeEmptyEnv(home);
+  await setMark(home, MARK_ENV_CLEANED);
+  created.push(`${join(home, ".env")} (vide)`);
 }
 
 /**
  * Verrou de préparation d'un agent : dossier `<instanceHome>/.hermes-control/prepare-<slug>.lock` (mkdir atomique).
- * Périmé après 10 min (processus mort) → repris ; sinon erreur claire « préparation déjà en cours ».
+ * Périmé après 10 min (processus mort) → revendiqué ; sinon erreur claire « préparation déjà en cours ».
  */
-export async function withPrepareLock<T>(instanceHome: string, agentSlug: string, fn: () => Promise<T>): Promise<T> {
-  const dir = join(instanceHome, ".hermes-control");
-  const lock = join(dir, `prepare-${assertSafeName(agentSlug)}.lock`);
-  await mkdir(dir, { recursive: true });
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await mkdir(lock);
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const st = await stat(lock).catch(() => null);
-      if (st && Date.now() - st.mtimeMs > PREPARE_LOCK_STALE_MS && attempt === 0) {
-        await rm(lock, { recursive: true, force: true }); // verrou oublié : repris
-        continue;
-      }
-      throw new Error(`préparation déjà en cours pour « ${agentSlug} » (verrou ${lock})`);
-    }
-  }
-  try {
-    return await fn();
-  } finally {
-    await rm(lock, { recursive: true, force: true });
-  }
+export function withPrepareLock<T>(instanceHome: string, agentSlug: string, fn: () => Promise<T>): Promise<T> {
+  const lock = join(instanceHome, ".hermes-control", `prepare-${assertSafeName(agentSlug)}.lock`);
+  return withDirLock(lock, { waitMs: 0, staleMs: PREPARE_LOCK_STALE_MS, busy: `préparation déjà en cours pour « ${agentSlug} » (verrou ${lock})` }, fn);
 }
 
 function render(tpl: string, vars: Record<string, string>): string {
@@ -196,10 +196,18 @@ async function prepareLocked(input: PrepareInput, s: string): Promise<PrepareRes
     const description = input.title ? `${input.agentName} — ${input.title}` : input.agentName;
     await profileCreate(input.instanceHome, s, description, binary, { clone: true });
     created.push(`profil Hermes ${basename(input.instanceHome)}/${s}`);
-    if (!(await exists(join(home, "config.yaml")))) throw new Error(`le profil ${home} n'a pas été créé par hermes`);
-    // R02a : le clone a copié le .env de l'instance (clés, jeton Telegram) → remplacé par un .env vide
-    await writeEmptyEnv(home);
-    created.push(`${join(home, ".env")} (vide)`);
+    try {
+      if (!(await exists(join(home, "config.yaml")))) throw new Error(`le profil ${home} n'a pas été créé par hermes`);
+    } finally {
+      // R02a : quoi qu'il arrive ensuite, le .env copié par le clone (clés, jeton Telegram) est vidé tout de suite
+      if (await exists(home)) {
+        await setMark(home, MARK_PREPARED);
+        await cleanEnv(home, created);
+      }
+    }
+  } else if ((await hasMark(home, MARK_PREPARED)) && !(await hasMark(home, MARK_ENV_CLEANED))) {
+    // profil créé par nous à un passage interrompu avant le vidage : on termine (jamais pour un profil fait à la main)
+    await cleanEnv(home, created);
   }
   if (!(await exists(join(home, "config.yaml")))) throw new Error(`le profil ${home} n'a pas été créé par hermes`);
 

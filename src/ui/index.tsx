@@ -11,7 +11,7 @@ type AgentState = "installed" | "connected" | "authorized";
 interface Health { socketPathBytes: number; socketPathOk: boolean; skills: { name: string; yamlOk: boolean; hiddenByPlatforms: boolean }[]; configError: string | null; alerts: string[] }
 interface Data { instances: Instance[]; sync: Sync[]; workspace: Workspace | null; telegram: Record<string, boolean>; health: Record<string, Health>; states: Record<string, AgentState> }
 
-const STATE_LABEL: Record<AgentState, string> = { installed: "installé", connected: "connecté", authorized: "autorisé et testé" };
+const STATE_LABEL: Record<AgentState, string> = { installed: "installé", connected: "connecté", authorized: "autorisé" };
 
 const S = {
   wrap: { padding: 16, display: "grid", gap: 16, fontSize: 14 } as React.CSSProperties,
@@ -57,7 +57,7 @@ function Orphan({ s, companyId, onDone }: { s: Sync; companyId: string; onDone: 
   );
 }
 
-/* ---------- État en trois valeurs : installé (profil présent) / connecté / autorisé et testé ---------- */
+/* ---------- État en trois valeurs : installé (profil présent) / connecté / autorisé ---------- */
 function State({ state }: { state: AgentState }) {
   const color = state === "authorized" ? "#22c55e" : state === "connected" ? "#eab308" : "inherit";
   return <span style={{ color }}>{STATE_LABEL[state]}</span>;
@@ -146,7 +146,7 @@ export function HermesPage() {
         <div style={{ ...S.card, borderColor: "#ef4444", display: "grid", gap: 8 }}>
           <strong style={{ color: "#ef4444" }}>Agents Hermes sans profil</strong>
           {orphans.map((s) => <Orphan key={s.agentId} s={s} companyId={companyId} onDone={refresh} />)}
-          <span style={S.muted}>« Préparer l'agent » crée son profil Hermes dans l'instance de l'entreprise (celle qui porte son nom), ses dossiers dans le dossier de travail et ses liens (mémoire, journal, skills communs), avec un .env vide. Ouvrir cette page ne prépare rien.</span>
+          <span style={S.muted}>« Préparer l'agent » crée son profil Hermes dans l'instance de l'entreprise (celle qui porte son nom), ses dossiers dans le dossier de travail et ses liens (mémoire, journal, skills communs), avec un .env vide. Ouvrir cette page ne crée ni profil, ni dossier, ni lien et n'exécute aucun lanceur.</span>
         </div>
       )}
     </div>

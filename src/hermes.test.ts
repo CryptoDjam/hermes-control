@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertSafeName, homeFromLauncherFile, parseAuthStatus, parseConfig, readConfigStrict, readInstance } from "./hermes.js";
@@ -21,6 +21,14 @@ describe("parseAuthStatus", () => {
     expect(parseAuthStatus("openai-codex: logged in")).toBe("logged_in");
     expect(parseAuthStatus("openai-codex: logged out (No Codex credentials stored. Run `hermes auth`)")).toBe("logged_out");
     expect(parseAuthStatus("???")).toBe("unknown");
+  });
+  it("les négations passent avant les mots positifs", () => {
+    expect(parseAuthStatus("openai-codex: not logged in")).toBe("logged_out");
+    expect(parseAuthStatus("anthropic: invalid credentials")).toBe("logged_out");
+    expect(parseAuthStatus("token expired, run hermes auth")).toBe("logged_out");
+    expect(parseAuthStatus("not authenticated")).toBe("logged_out");
+    expect(parseAuthStatus("No API credentials stored")).toBe("logged_out");
+    expect(parseAuthStatus("Logged in as x (valid)")).toBe("logged_in");
   });
 });
 
@@ -66,6 +74,22 @@ exec "$HERMES_BIN" "$@"
     expect(await homeFromLauncherFile(c)).toBe("/srv/hermes/prod");
   });
 
+  it("apostrophes = littéral (sauf si elles contiennent $) ; `VAR=x commande` ignoré ; lanceur relatif refusé ; résultat par realpath", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hc-launcher-"));
+    await writeFile(join(root, "sq"), "export HERMES_HOME='/srv/h$HOME'\n");
+    expect(await homeFromLauncherFile(join(root, "sq"))).toBeNull();
+    await writeFile(join(root, "sq2"), "ROOT='/srv/h'\nexport HERMES_HOME=\"$ROOT/prod\"\n");
+    expect(await homeFromLauncherFile(join(root, "sq2"))).toBe("/srv/h/prod");
+    await writeFile(join(root, "cmd"), "HERMES_HOME=/ailleurs exec hermes \"$@\"\nexport HERMES_HOME=/srv/vrai\n");
+    expect(await homeFromLauncherFile(join(root, "cmd"))).toBe("/srv/vrai");
+    expect(await homeFromLauncherFile("bin/hermes-x")).toBeNull();
+    // le dossier visé est un lien : on renvoie le chemin réel
+    await mkdir(join(root, "reel"));
+    await symlink(join(root, "reel"), join(root, "lien"));
+    await writeFile(join(root, "ln"), `HERMES_HOME=${join(root, "lien")}\n`);
+    expect(await homeFromLauncherFile(join(root, "ln"))).toBe(join(root, "reel"));
+  });
+
   it("null si pas de HERMES_HOME, variable inconnue, sous-shell, fichier absent ou trop gros", async () => {
     const root = await mkdtemp(join(tmpdir(), "hc-launcher-"));
     await writeFile(join(root, "none"), "#!/bin/bash\nexec hermes \"$@\"\n");
@@ -94,6 +118,14 @@ describe("readConfigStrict", () => {
     await writeFile(join(home, "config.yaml"), "- a\n- b\n");
     expect((await readConfigStrict(home)).error).toMatch(/pas un objet/);
     expect(await readFile(join(home, "config.yaml"), "utf8")).toBe("- a\n- b\n"); // jamais réécrit
+  });
+
+  it("clés dupliquées tolérées (comme safe_load Python)", async () => {
+    const home = await mkdtemp(join(tmpdir(), "hc-cfg-"));
+    await writeFile(join(home, "config.yaml"), "model:\n  default: a\nmodel:\n  default: b\n");
+    const r = await readConfigStrict(home);
+    expect(r.error).toBeNull();
+    expect(r.cfg).toEqual({ model: { default: "b" } });
   });
 
   it("readInstance porte configError sur le profil illisible", async () => {

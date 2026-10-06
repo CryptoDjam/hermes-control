@@ -3,13 +3,17 @@
 //    le menu de l'agent sont écrits dans le config.yaml de ce profil (`hermes config set`, sans shell) ;
 //  - un agent Hermes créé dans Paperclip sans profil → son profil, ses dossiers et ses liens sont préparés
 //    sur `agent.created` / `agent.updated` ou par le bouton « Préparer » ; JAMAIS en ouvrant la vue ;
-//  - la vue ne lance aucun lanceur d'agent (lecture statique du script) et n'écrit rien ;
+//  - la vue ne crée ni profil, ni dossier, ni lien et n'exécute aucun lanceur (lecture statique du script) ;
+//    elle synchronise encore les champs déclarés des agents reliés (`hermes config set`) et écrit agents.json ;
 //  - un config.yaml ou un agents.json corrompu → refus, jamais de réécriture ;
 //  - une seule donnée exposée à l'interface : « instances » ; deux actions : prepare-agent, set-telegram.
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
+import { stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { instanceHomes } from "./discovery.js";
+import { withDirLock } from "./lock.js";
+import { controlDir } from "./paths.js";
 import { type HermesInstance, detectDashboards, homeFromLauncherFile, instanceNameFromHome, readInstance } from "./hermes.js";
 import { matchAgent } from "./match.js";
 import { agentsMapError, rememberAgent } from "./agents-map.js";
@@ -69,7 +73,7 @@ const plugin = definePlugin({
   async setup(ctx: PluginContext) {
     const log = ctx.logger;
     const BINARY = hermesBinary();
-    const launcherHomes = new Map<string, string | null>();
+    const launcherHomes = new Map<string, string>(); // clé : chemin + mtime du lanceur ; jamais de null en cache
 
     /** Agents Hermes de l'entreprise, réduits aux données utiles. */
     async function snapshotAgents(companyId: string): Promise<AgentSnapshot[]> {
@@ -85,17 +89,28 @@ const plugin = definePlugin({
       return out;
     }
 
+    /** HERMES_HOME d'un lanceur, lu statiquement ; cache invalidé dès que le fichier change (mtime). */
+    async function launcherHome(launcher: string): Promise<string | null> {
+      const st = await stat(launcher).catch(() => null);
+      if (!st) return null;
+      const key = `${launcher}@${st.mtimeMs}`;
+      const cached = launcherHomes.get(key);
+      if (cached) return cached;
+      const home = await homeFromLauncherFile(launcher);
+      if (home) launcherHomes.set(key, home);
+      return home;
+    }
+
     /** Instances : racines configurées (~/.hermes, roots) + celles lues STATIQUEMENT dans les lanceurs des agents (jamais exécutés). */
     async function instances(snap: AgentSnapshot[], light: boolean): Promise<HermesInstance[]> {
       const extra: string[] = [];
       for (const a of snap) {
         if (!a.launcher) continue;
-        if (!launcherHomes.has(a.launcher)) launcherHomes.set(a.launcher, await homeFromLauncherFile(a.launcher));
-        const home = launcherHomes.get(a.launcher);
+        const home = await launcherHome(a.launcher);
         if (!home) continue;
+        // un lanceur de profil (<instance>/profiles/<p>) ramène à son instance : « profiles » en avant-dernier segment
         const parts = home.split("/");
-        const i = parts.lastIndexOf("profiles");
-        extra.push(i > 0 ? resolve(home, "..", "..") : home);
+        extra.push(parts[parts.length - 2] === "profiles" ? resolve(home, "..", "..") : home);
       }
       const detected = light ? {} : await detectDashboards();
       const out: HermesInstance[] = [];
@@ -212,7 +227,7 @@ const plugin = definePlugin({
       return (await healthOf(await instances(snap, true), sync)).alerts;
     };
 
-    // ---- la seule donnée pour l'interface : lecture + synchro des agents déjà reliés ; ne prépare JAMAIS ----
+    // ---- la seule donnée pour l'interface : lecture + synchro des agents déjà reliés (config set, agents.json) ; ne prépare JAMAIS ----
     ctx.data.register("instances", async (params) => {
       const companyId = String(params["companyId"] ?? "");
       if (!companyId) throw new Error("companyId manquant");
@@ -250,16 +265,20 @@ const plugin = definePlugin({
       const snap = ((await ctx.state.get(SNAPSHOT_KEY)) as AgentSnapshot[] | null) ?? [];
       const known = (await instances(snap, true)).flatMap((i) => i.profiles.map((p) => p.home));
       if (!known.includes(home)) throw new Error("profil Hermes inconnu");
-      await assertGatewayFree(home, known); // une seule passerelle Telegram par machine
-      const changed = await setTelegramToken(home, token);
-      let gateway = "";
-      try {
-        gateway = (await startGateway(home, BINARY)).trim().split("\n").slice(-2).join(" ");
-      } catch (e) {
-        gateway = e instanceof Error ? e.message : String(e);
-      }
-      log.info("jeton Telegram enregistré", { home: join(home, ".env"), changed });
-      return { changed, gateway };
+      // un seul set-telegram à la fois : le garde-fou « passerelle unique » lit puis écrit
+      const lock = join(controlDir(), "set-telegram.lock");
+      return withDirLock(lock, { waitMs: 2_000, staleMs: 30_000, busy: "un autre enregistrement de jeton Telegram est en cours ; réessaie" }, async () => {
+        await assertGatewayFree(home, known); // une seule passerelle Telegram par machine
+        const changed = await setTelegramToken(home, token);
+        let gateway = "";
+        try {
+          gateway = (await startGateway(home, BINARY)).trim().split("\n").slice(-2).join(" ");
+        } catch (e) {
+          gateway = e instanceof Error ? e.message : String(e);
+        }
+        log.info("jeton Telegram enregistré", { home: join(home, ".env"), changed });
+        return { changed, gateway };
+      });
     });
 
     // ---- un agent créé ou modifié dans Paperclip → Hermes se synchronise, et prépare l'agent sans profil ----
@@ -295,7 +314,7 @@ const plugin = definePlugin({
       if (!alerts.length) return { status: "ok" as const, message: "Hermes Control" };
       return { status: "degraded" as const, message: `Hermes Control : ${alerts.length} alerte(s) — ${alerts[0]}`, details: { alerts } };
     } catch (e) {
-      return { status: "degraded" as const, message: `Hermes Control : sonde de santé en échec (${e instanceof Error ? e.message : String(e)})` };
+      return { status: "error" as const, message: `Hermes Control : sonde de santé en échec (${e instanceof Error ? e.message : String(e)})` };
     }
   },
 });

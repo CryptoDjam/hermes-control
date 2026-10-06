@@ -2,9 +2,10 @@
 // Pourquoi : Paperclip appelle listSkills / syncSkills avec seulement l'identifiant de l'agent (pas son nom) ;
 // et depuis la 0.6 l'adaptateur refuse de lancer un agent qui n'y figure pas (R02b : affectation contrôlée avant réveil).
 // Écrite par le plugin à chaque synchro / préparation, sous verrou ; un fichier corrompu n'est jamais réécrit.
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { withDirLock } from "./lock.js";
+import { controlDir } from "./paths.js";
 
 export interface RememberedAgent {
   name: string;
@@ -16,11 +17,11 @@ export interface RememberedAgent {
 
 const LOCK_WAIT_MS = 2_000; // délai maximal d'attente du verrou
 const LOCK_STALE_MS = 30_000; // au-delà, un verrou oublié (processus mort) est repris
-const LOCK_RETRY_MS = 25;
 
-/** Calculé à l'appel (pas à l'import) : HOME peut changer, notamment dans les tests. */
+/** Calculé à l'appel (pas à l'import) : HERMES_CONTROL_AGENTS_MAP si défini, sinon ~/.config/hermes-control/agents.json. */
 export function agentsMapFile(): string {
-  return join(homedir(), ".config", "hermes-control", "agents.json");
+  const env = process.env["HERMES_CONTROL_AGENTS_MAP"]?.trim();
+  return env || join(controlDir(), "agents.json");
 }
 
 /** Absent → carte vide ; présent mais pas un objet JSON valide → `error` (le fichier reste tel quel). */
@@ -41,33 +42,10 @@ async function readMap(): Promise<{ map: Record<string, RememberedAgent>; error:
   }
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/** Verrou par dossier (mkdir atomique) autour d'une lecture-modification-écriture. */
-async function withMapLock<T>(fn: () => Promise<T>): Promise<T> {
+/** Verrou autour d'une lecture-modification-écriture de la carte. */
+function withMapLock<T>(fn: () => Promise<T>): Promise<T> {
   const lock = `${agentsMapFile()}.lock`;
-  await mkdir(dirname(lock), { recursive: true });
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      await mkdir(lock);
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const st = await stat(lock).catch(() => null);
-      if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-        await rm(lock, { recursive: true, force: true });
-        continue;
-      }
-      if (Date.now() > deadline) throw new Error(`agents.json : verrou tenu trop longtemps (${lock})`);
-      await sleep(LOCK_RETRY_MS);
-    }
-  }
-  try {
-    return await fn();
-  } finally {
-    await rm(lock, { recursive: true, force: true });
-  }
+  return withDirLock(lock, { waitMs: LOCK_WAIT_MS, staleMs: LOCK_STALE_MS, busy: `agents.json : verrou tenu trop longtemps (${lock})` }, fn);
 }
 
 /** Mémorise l'affectation d'un agent. Refuse (erreur explicite, fichier intact) si agents.json est corrompu. */
@@ -80,6 +58,7 @@ export async function rememberAgent(agentId: string, m: Omit<RememberedAgent, "a
     if (prev && prev.home === m.home && prev.name === m.name && prev.instance === m.instance && prev.profile === m.profile) return;
     map[agentId] = { ...m, at: new Date().toISOString() };
     const file = agentsMapFile();
+    await mkdir(dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
     await writeFile(tmp, JSON.stringify(map, null, 2) + "\n", { mode: 0o600 });
     await rename(tmp, file);

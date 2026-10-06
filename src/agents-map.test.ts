@@ -66,3 +66,32 @@ describe("agents.json corrompu et verrou", () => {
     await expect(lstat(`${agentsMapFile()}.lock`)).rejects.toThrow();
   });
 });
+
+describe("chemin de la carte et verrou périmé", () => {
+  it("HERMES_CONTROL_AGENTS_MAP l'emporte sur ~/.config/hermes-control/agents.json", async () => {
+    process.env["HERMES_CONTROL_AGENTS_MAP"] = join(root, "ailleurs", "carte.json");
+    try {
+      expect(agentsMapFile()).toBe(join(root, "ailleurs", "carte.json"));
+      await rememberAgent("a1", { name: "Chef", instance: "direction", profile: "default", home: "/x" });
+      expect((await recallAgent("a1"))?.home).toBe("/x");
+      await expect(readFile(join(root, ".config", "hermes-control", "agents.json"))).rejects.toThrow();
+    } finally {
+      delete process.env["HERMES_CONTROL_AGENTS_MAP"];
+    }
+  });
+
+  it("un verrou périmé (> 30 s) est revendiqué ; un verrou récent fait attendre puis échouer", async () => {
+    const { mkdir, utimes } = await import("node:fs/promises");
+    const { dirname } = await import("node:path");
+    const lock = `${agentsMapFile()}.lock`;
+    await mkdir(lock, { recursive: true });
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lock, old, old);
+    await rememberAgent("a1", { name: "Chef", instance: "direction", profile: "default", home: "/x" });
+    expect((await recallAgent("a1"))?.home).toBe("/x");
+    await expect(readFile(lock)).rejects.toThrow(); // relâché
+    await mkdir(lock, { recursive: true }); // récent : tenu
+    expect(dirname(lock)).toBe(dirname(agentsMapFile()));
+    await expect(rememberAgent("a2", { name: "x", instance: "i", profile: "p", home: "/y" })).rejects.toThrow(/verrou tenu trop longtemps/);
+  }, 10_000);
+});

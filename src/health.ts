@@ -3,6 +3,7 @@
 //  - en-tête YAML de chaque skill (un en-tête invalide avec `platforms:` cache la skill sans bruit) ;
 //  - config.yaml illisible ;
 //  - trois états par agent : installé (profil présent) / connecté (authStatus logged_in) / autorisé (connecté + dernière synchro sans erreur).
+//    (« autorisé et testé », avec un test de connexion à cas négatif, reste à faire : voir README.)
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import YAML from "yaml";
@@ -40,7 +41,7 @@ export function checkSkillHeader(name: string, text: string): SkillHealth {
   if (header === null) return { name, yamlOk: false, hiddenByPlatforms: false };
   let ok = false;
   try {
-    const doc = YAML.parse(header) as unknown;
+    const doc = YAML.parse(header, { uniqueKeys: false }) as unknown; // comme safe_load Python
     ok = !!doc && typeof doc === "object" && !Array.isArray(doc);
   } catch {
     ok = false;
@@ -93,10 +94,10 @@ export async function checkProfile(home: string): Promise<ProfileHealth> {
   return { socketPathBytes, socketPathOk: socketPathBytes <= SOCKET_PATH_MAX, sockets, skills, configError, alerts };
 }
 
-/** installé = profil présent ; connecté = authStatus logged_in ; autorisé et testé = connecté + dernière synchro sans erreur. */
+/** installé = profil présent ; connecté = authStatus logged_in ; autorisé = connecté + dernière synchro sans erreur. */
 export function agentState(rec: { error: string | null }, profile: Pick<HermesProfile, "authStatus">): AgentState {
   if (profile.authStatus !== "logged_in") return "installed";
   return rec.error === null ? "authorized" : "connected";
 }
 
-export const STATE_LABEL: Record<AgentState, string> = { installed: "installé", connected: "connecté", authorized: "autorisé et testé" };
+export const STATE_LABEL: Record<AgentState, string> = { installed: "installé", connected: "connecté", authorized: "autorisé" };

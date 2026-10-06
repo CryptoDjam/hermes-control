@@ -7,12 +7,12 @@
 //    à la synchro Paperclip et à chaque passage ; décochés → liens retirés.
 // Auteur : Cyril M — MIT.
 import { createHermesLocalServerAdapter } from "@paperclipai/hermes-paperclip-adapter";
-import { access } from "node:fs/promises";
+import { access, realpath } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { discoverLight } from "../../src/discovery.js";
-import { type HermesInstance, readModelCatalogs } from "../../src/hermes.js";
+import { type HermesInstance, homeFromLauncherFile, readConfigStrict, readModelCatalogs } from "../../src/hermes.js";
 import { agentsMapError, agentsMapFile, recallAgent } from "../../src/agents-map.js";
 import { slug } from "../../src/match.js";
 import { exists, readWorkspace } from "../../src/workspace.js";
@@ -79,8 +79,15 @@ async function hermesModels(list: HermesInstance[]): Promise<{ id: string; label
 
 const NOT_ASSIGNED = "agent non affecté à une instance Hermes : synchronise ou prépare l'agent dans Paperclip (page Hermes)";
 
-/** Affectation d'un agent, contrôlée AVANT tout passage : entrée dans agents.json ET profil toujours présent (config.yaml). */
-async function assignmentOf(agentId: string | undefined, name: string): Promise<{ instance: string; profile: string; home: string }> {
+async function realOrResolved(p: string): Promise<string> {
+  return (await realpath(p).catch(() => null)) ?? resolve(p);
+}
+
+/**
+ * Affectation d'un agent, contrôlée AVANT tout passage : entrée dans agents.json, profil toujours présent (config.yaml)
+ * et lisible, et cohérente avec le lanceur de l'agent (un lanceur fait `export HERMES_HOME=…`, qui écraserait le nôtre).
+ */
+async function assignmentOf(agentId: string | undefined, name: string, launcher: string | null): Promise<{ instance: string; profile: string; home: string }> {
   const rec = agentId ? await recallAgent(agentId) : null;
   if (!rec) {
     const mapErr = await agentsMapError();
@@ -88,6 +95,15 @@ async function assignmentOf(agentId: string | undefined, name: string): Promise<
   }
   if (!(await exists(join(rec.home, "config.yaml")))) {
     throw new Error(`[hermes-control] « ${name} » : affecté à ${rec.instance}/${rec.profile} mais ${rec.home}/config.yaml n'existe plus ; ${NOT_ASSIGNED}.`);
+  }
+  const { error } = await readConfigStrict(rec.home);
+  if (error) throw new Error(`[hermes-control] « ${name} » : ${rec.home}/${error} ; aucun passage tant que le fichier n'est pas réparé.`);
+  if (launcher) {
+    const fromLauncher = await homeFromLauncherFile(launcher);
+    if (fromLauncher) {
+      const [a, b] = await Promise.all([realOrResolved(rec.home), realOrResolved(fromLauncher)]);
+      if (a !== b) throw new Error(`[hermes-control] « ${name} » : affectation (agents.json) ≠ lanceur : ${a} vs ${b} (${launcher}) ; corrige l'un ou l'autre.`);
+    }
   }
   return rec;
 }
@@ -97,9 +113,10 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
   const execute: Base["execute"] = async (ctx) => {
     const c = ctx as unknown as { config?: AnyRecord; onLog?: (stream: "stdout" | "stderr", text: string) => Promise<void> | void; agent: { id?: string; name: string; adapterConfig?: unknown } };
     const config: AnyRecord = { ...((c.config ?? (c.agent.adapterConfig as AnyRecord | undefined)) ?? {}) };
+    const launcher = typeof config["hermesCommand"] === "string" && config["hermesCommand"].includes("/") ? (config["hermesCommand"] as string) : null;
     let m: { instance: string; profile: string; home: string };
     try {
-      m = await assignmentOf(c.agent.id, c.agent.name);
+      m = await assignmentOf(c.agent.id, c.agent.name, launcher);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       await c.onLog?.("stderr", msg + "\n");

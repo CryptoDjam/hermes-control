@@ -43,7 +43,7 @@ describe("jeton Telegram", () => {
 
 describe("garde-fou passerelle Telegram unique", () => {
   it("gatewayOwners lit les unités hermes-gateway*.service (HOME temporaire) ; assertGatewayFree refuse pour un autre HERMES_HOME ou un autre profil avec jeton", async () => {
-    const { mkdir } = await import("node:fs/promises");
+    const { mkdir, rm } = await import("node:fs/promises");
     const { assertGatewayFree, gatewayOwners } = await import("./telegram.js");
     const root = await mkdtemp(join(tmpdir(), "hc-gw-"));
     const saved = process.env["HOME"];
@@ -56,11 +56,14 @@ describe("garde-fou passerelle Telegram unique", () => {
       await writeFile(join(units, "hermes-gateway-apolline-m.service"), `[Service]\nExecStart=/x/python -m hermes_cli.main --profile apolline-m gateway run\nEnvironment="HERMES_HOME=${owner}"\nEnvironment="HERMES_SUPERVISED_CHILD=1"\n`);
       await writeFile(join(units, "hermes-dashboard-direction.service"), "Environment=HERMES_HOME=%h/direction\n"); // pas une passerelle : ignorée
       expect(await gatewayOwners()).toEqual([{ unit: "hermes-gateway-apolline-m.service", home: owner }]);
+      // plusieurs paires sur une ligne, et %h
+      await writeFile(join(units, "hermes-gateway-b.service"), `[Service]\nEnvironment="A=1" "HERMES_HOME=%h/b" "C=3"\n`);
+      expect((await gatewayOwners()).map((o) => o.home)).toEqual([owner, join(root, "b")]);
+      await rm(join(units, "hermes-gateway-b.service"));
       const other = join(root, "direction");
       await expect(assertGatewayFree(other, [owner, other])).rejects.toThrow(new RegExp(`${owner}.*hermes-gateway-apolline-m.service`));
       await expect(assertGatewayFree(owner, [owner, other])).resolves.toBeUndefined(); // le même profil peut changer son jeton
       // sans unité, un autre profil connu qui a déjà TELEGRAM_BOT_TOKEN suffit à refuser (nom de variable seulement)
-      const { rm } = await import("node:fs/promises");
       await rm(join(units, "hermes-gateway-apolline-m.service"));
       await mkdir(owner, { recursive: true });
       await writeFile(join(owner, ".env"), "TELEGRAM_BOT_TOKEN=secret\n");

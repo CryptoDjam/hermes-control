@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_ENV, prepareAgent, withPrepareLock } from "./prepare.js";
+import { EMPTY_ENV, prepareAgent, withPrepareLock, writeEmptyEnv } from "./prepare.js";
 import { layout } from "./workspace.js";
 
 let root: string;
@@ -118,6 +118,37 @@ describe("prepareAgent", () => {
     expect(r.created.some((c) => c.endsWith(".env (vide)"))).toBe(true);
     // l'instance garde ses clés : on ne touche qu'au profil
     expect(await readFile(join(ws.profils, "acme", ".env"), "utf8")).toContain("marqueur");
+  });
+
+  it("R02a idempotent : marqueurs ; un profil créé par nous mais au .env non vidé est vidé au passage suivant ; un profil fait à la main est laissé", async () => {
+    const ws = layout(join(root, "ws"));
+    const inst = join(ws.profils, "acme");
+    const r = await prepareAgent({ ws, instanceHome: inst, agentName: "Apolline M", binary: fakeHermes });
+    expect(await stat(join(r.profileHome, ".hermes-control", "prepared-by-hermes-control"))).toBeTruthy();
+    expect(await stat(join(r.profileHome, ".hermes-control", "env-cleaned"))).toBeTruthy();
+    // passage interrompu simulé : marqueur de vidage absent, .env avec une clé
+    await rm(join(r.profileHome, ".hermes-control", "env-cleaned"));
+    await writeFile(join(r.profileHome, ".env"), "OPENAI_API_KEY=marqueur\n");
+    const again = await prepareAgent({ ws, instanceHome: inst, agentName: "Apolline M", binary: fakeHermes });
+    expect(await readFile(join(r.profileHome, ".env"), "utf8")).toBe(EMPTY_ENV);
+    expect(again.created).toEqual([`${join(r.profileHome, ".env")} (vide)`]);
+    // profil existant fait à la main (pas de marqueur) : son .env n'est pas touché
+    await mkdir(join(inst, "profiles", "manuel"), { recursive: true });
+    await writeFile(join(inst, "profiles", "manuel", "config.yaml"), "model: {}\n");
+    await writeFile(join(inst, "profiles", "manuel", ".env"), "MA_CLE=gardee\n");
+    await prepareAgent({ ws, instanceHome: inst, agentName: "Manuel", binary: fakeHermes });
+    expect(await readFile(join(inst, "profiles", "manuel", ".env"), "utf8")).toBe("MA_CLE=gardee\n");
+  });
+
+  it("writeEmptyEnv ne suit jamais un lien : le lien est remplacé par un fichier, la cible intacte", async () => {
+    const home = join(root, "lien-env");
+    await mkdir(home);
+    await writeFile(join(root, "cible.env"), "SECRET=x\n");
+    await symlink(join(root, "cible.env"), join(home, ".env"));
+    await writeEmptyEnv(home);
+    expect((await lstat(join(home, ".env"))).isSymbolicLink()).toBe(false);
+    expect(await readFile(join(home, ".env"), "utf8")).toBe(EMPTY_ENV);
+    expect(await readFile(join(root, "cible.env"), "utf8")).toBe("SECRET=x\n");
   });
 
   it("verrou : deux préparations concurrentes du même agent → une seule passe, l'autre reçoit « déjà en cours », aucun doublon", async () => {

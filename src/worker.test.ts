@@ -120,6 +120,28 @@ exit 0
     expect(r.health[join(inst, "profiles", "casse")]?.alerts.join(" ")).toMatch(/invalide/);
   });
 
+  it("lanceur d'agent lu statiquement : un lanceur de profil ramène à son instance ; le cache suit le mtime du fichier", async () => {
+    const { utimes } = await import("node:fs/promises");
+    const other = join(root, "autre-racine", "beta");
+    await mkdir(join(other, "profiles", "p1"), { recursive: true });
+    await writeFile(join(other, "config.yaml"), "model: {}\n");
+    await writeFile(join(other, "profiles", "p1", "config.yaml"), "model: {}\n");
+    const gamma = join(root, "autre-racine", "gamma");
+    await mkdir(gamma, { recursive: true });
+    await writeFile(join(gamma, "config.yaml"), "model: {}\n");
+    const launcher = join(root, "bin", "hermes-p1");
+    await writeFile(launcher, `#!/bin/bash\nexport HERMES_HOME="${join(other, "profiles", "p1")}"\nexec hermes "$@"\n`, { mode: 0o644 });
+    const h = await start();
+    h.seed({ companies: [{ id: "co", name: "ACME" } as never], agents: [{ id: "a1", companyId: "co", name: "P1", adapterType: "hermes_local", adapterConfig: { hermesCommand: launcher }, status: "idle" } as never] });
+    const r1 = await h.getData<{ instances: { name: string }[] }>("instances", { companyId: "co" });
+    expect(r1.instances.map((i) => i.name).sort()).toEqual(["acme", "beta"]); // beta = instance du profil p1, pas p1
+    await writeFile(launcher, `#!/bin/bash\nexport HERMES_HOME="${gamma}"\n`, { mode: 0o644 });
+    const later = new Date(Date.now() + 5_000);
+    await utimes(launcher, later, later);
+    const r2 = await h.getData<{ instances: { name: string }[] }>("instances", { companyId: "co" });
+    expect(r2.instances.map((i) => i.name).sort()).toEqual(["acme", "gamma"]);
+  });
+
   it("set-telegram refuse quand une unité de passerelle existe pour un autre profil", async () => {
     const units = join(root, ".config", "systemd", "user");
     await mkdir(units, { recursive: true });

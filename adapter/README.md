@@ -2,7 +2,7 @@
 
 The adapter half of **Hermes Control** — a drop-in override of Paperclip's built-in `hermes_local` adapter:
 - the agent's **Provider** and **Model** menus list the providers and models your Hermes instances know;
-- the agent runs **only in the Hermes profile assigned to it** in `~/.config/hermes-control/agents.json` (written by the plugin when it syncs or prepares the agent); `HERMES_HOME` is set to that profile, no launcher scripts. An agent with no assignment, or whose profile lost its `config.yaml`, **refuses to run** (« agent non affecté à une instance Hermes : synchronise ou prépare l'agent dans Paperclip (page Hermes) »);
+- the agent runs **only in the Hermes profile assigned to it** in `~/.config/hermes-control/agents.json` (written by the plugin when it syncs or prepares the agent); `HERMES_HOME` is set to that profile. Launcher scripts (`hermesCommand`) remain the rule in production: they `export HERMES_HOME=…` themselves, so the adapter reads the launcher statically and **refuses to run when the launcher's `HERMES_HOME` differs from the assignment** (« affectation (agents.json) ≠ lanceur »). An agent with no assignment, or whose profile lost its `config.yaml` or has an unreadable one, **refuses to run** (« agent non affecté à une instance Hermes : synchronise ou prépare l'agent dans Paperclip (page Hermes) »);
 - skills assigned in Paperclip are linked into `<profile>/skills`;
 - *Test environment* shows the instances found.
 

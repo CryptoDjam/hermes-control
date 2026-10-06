@@ -6,8 +6,8 @@
 // Le chemin est noté dans ~/.config/hermes-control/workspace (une ligne). Sans ce fichier : rien d'automatique.
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { controlDir, userHome } from "./paths.js";
 
 export interface Workspace {
   root: string;
@@ -18,7 +18,7 @@ export interface Workspace {
 }
 
 export function workspaceFile(): string {
-  return join(homedir(), ".config", "hermes-control", "workspace");
+  return join(controlDir(), "workspace");
 }
 
 export function layout(root: string): Workspace {
@@ -31,7 +31,7 @@ export async function readWorkspace(): Promise<Workspace | null> {
   if (fromEnv && fromEnv.trim()) return layout(fromEnv.trim());
   try {
     const line = (await readFile(workspaceFile(), "utf8")).split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#"));
-    return line ? layout(line.replace(/^~(?=\/|$)/, homedir())) : null;
+    return line ? layout(line.replace(/^~(?=\/|$)/, userHome())) : null;
   } catch {
     return null;
   }

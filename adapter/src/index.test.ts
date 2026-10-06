@@ -83,6 +83,31 @@ describe("adaptateur Hermes Control", () => {
     expect(logs.join("")).toContain("affectation agents.json");
   });
 
+  it("lanceur (hermesCommand) dont le HERMES_HOME diffère de l'affectation → refus ; identique → passe", async () => {
+    const { a, calls } = withSpy();
+    const home = join(root, "marketing", "profiles", "apolline-m");
+    await rememberAgent("ok", { name: "Apolline M", instance: "marketing", profile: "apolline-m", home });
+    const bad = join(root, "hermes-bad");
+    await writeFile(bad, `#!/bin/bash\nexport HERMES_HOME="${join(root, "marketing")}"\nexec hermes "$@"\n`);
+    await expect(a.execute(ctxFor("ok", "Apolline M", [], { hermesCommand: bad }))).rejects.toThrow(/affectation \(agents.json\) ≠ lanceur/);
+    expect(calls).toEqual([]);
+    const good = join(root, "hermes-good");
+    await writeFile(good, `#!/bin/bash\nexport HERMES_HOME="${home}"\nexec hermes "$@"\n`);
+    await a.execute(ctxFor("ok", "Apolline M", [], { hermesCommand: good }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!["hermesCommand"]).toBe(good);
+  });
+
+  it("profil affecté au config.yaml invalide → refus", async () => {
+    const { a, calls } = withSpy();
+    const home = join(root, "marketing", "profiles", "casse");
+    await mkdir(home, { recursive: true });
+    await writeFile(join(home, "config.yaml"), "model: [oops\n");
+    await rememberAgent("k", { name: "Casse", instance: "marketing", profile: "casse", home });
+    await expect(a.execute(ctxFor("k", "Casse", []))).rejects.toThrow(/config.yaml invalide/);
+    expect(calls).toEqual([]);
+  });
+
   it("HERMES_CONTROL_HERMES_BIN est pris avant ~/.local/bin/hermes pour hermesCommand", async () => {
     const { a, calls } = withSpy();
     const home = join(root, "marketing", "profiles", "apolline-m");

@@ -40,8 +40,9 @@ describe("checkProfile", () => {
     expect(h.alerts.join("\n")).toMatch(/« cachee » cachée/);
   });
 
-  it("checkSkillHeader sans en-tête → yamlOk faux", () => {
+  it("checkSkillHeader sans en-tête → yamlOk faux ; clés dupliquées tolérées (safe_load)", () => {
     expect(checkSkillHeader("x", "# pas d'en-tête\n")).toEqual({ name: "x", yamlOk: false, hiddenByPlatforms: false });
+    expect(checkSkillHeader("d", "---\nname: d\nname: d2\nplatforms: [telegram]\n---\n")).toEqual({ name: "d", yamlOk: true, hiddenByPlatforms: false });
   });
 });
 
