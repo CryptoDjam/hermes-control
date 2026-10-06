@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<title>Hermes Control — architecture (v0.5)</title>
+<title>Hermes Control — architecture (v0.6)</title>
 <style>
   @page { size: A4; margin: 16mm 14mm; }
   * { box-sizing: border-box; }
@@ -33,7 +33,7 @@
 <!-- ================= PAGE 1 ================= -->
 <section class="page">
   <h1>Hermes Control — Hermes moteur, Paperclip aux commandes</h1>
-  <div class="sous">Plugin Paperclip signé Cyril M · version 0.5.0, état au 6 octobre 2026 · code : <code>~/Projects/hermes-control/</code></div>
+  <div class="sous">Plugin Paperclip signé Cyril M · version 0.6.0 (commits locaux f0f2957, 8dd4d6c ; non publiée), état au 6 octobre 2026, 17 h · code : <code>~/Projects/hermes-control/</code></div>
 
   <h2>1. Le principe</h2>
   <p><strong>Paperclip est le maître.</strong> Pour chaque agent, Paperclip envoie cinq données : son <strong>nom</strong>, son <strong>working directory</strong>, son <strong>provider</strong>, son <strong>modèle</strong>, son <strong>thinking</strong>. Avec le nom, Hermes Control trouve le profil Hermes correspondant ; provider / modèle / thinking y sont écrits et Hermes tourne dessus. Dans l'autre sens, les menus Provider et Model du formulaire de base de l'agent listent ce que Hermes connaît. Depuis la 0.4, les <strong>skills</strong> cochés pour l'agent dans Paperclip suivent aussi : ils sont liés dans le dossier <code>skills</code> du profil Hermes de l'agent. Rien d'autre n'entre ni ne sort. Deux pièces dans un même projet : un <em>adaptateur</em> (remplace l'adaptateur Hermes intégré) et un <em>plugin</em> (synchro + une vue « instances »).</p>
