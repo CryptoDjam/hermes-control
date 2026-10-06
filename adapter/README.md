@@ -12,6 +12,6 @@ npx paperclipai adapter install --payload-json '{"packageName":"paperclip-adapte
 ```
 Instances are looked up in `~/.hermes`, in the folders listed in `~/.config/hermes-control/roots` (one per line) and in `$HERMES_CONTROL_ROOTS`. Hermes binary: `$HERMES_CONTROL_HERMES_BIN` if set, else `~/.local/bin/hermes`, else `hermes` in Paperclip's PATH. Pause or remove any time: `paperclipai adapter override hermes_local` / `adapter delete hermes_local`.
 
-Pairs with the plugin `paperclip-plugin-hermes-control` (Paperclip → Hermes sync + instances view). Source and docs: https://github.com/CryptoDjam/hermes-control
+Pairs with the plugin `paperclip-plugin-hermes-control` (Paperclip → Hermes sync + instances view). Source and docs: https://github.com/CyberServices-ai/hermes-control
 
 MIT © Cyril M

@@ -27,9 +27,9 @@ Nouvelle version : changer `version` dans `package.json` **et** `adapter/package
 - Le plugin a répondu `E403 … cannot be republished until 24 hours have passed` : `npm view paperclip-plugin-hermes-control` dit **« Unpublished on 2026-10-03T23:07:22Z »** (01:07 heure de Paris le 4). Un paquet dépublié ne peut pas être republié sous le même nom pendant 24 h → relancer `scripts/publish.sh` après le 2026-10-05 01:10 (le script saute l'adaptateur déjà publié). Ne jamais dépublier : préférer `npm deprecate`.
 
 ## 3. Après la première publication : publication sans jeton (GitHub Actions)
-Sur npmjs.com, pour chaque paquet : Package → Settings → **Trusted Publishing** → GitHub Actions → owner `CryptoDjam`, repo `hermes-control`, workflow `publish.yml`. Ensuite, créer une *release* GitHub (tag `vX.Y.Z`) publie les deux paquets automatiquement, avec provenance, sans jeton ni 2FA (`.github/workflows/publish.yml`).
+Sur npmjs.com, pour chaque paquet : Package → Settings → **Trusted Publishing** → GitHub Actions → owner `CyberServices-ai`, repo `hermes-control`, workflow `publish.yml`. Ensuite, créer une *release* GitHub (tag `vX.Y.Z`) publie les deux paquets automatiquement, avec provenance, sans jeton ni 2FA (`.github/workflows/publish.yml`).
 
-**Warning — owner rename.** Trusted Publishing is bound to the exact GitHub owner / repository / workflow. After the GitHub owner is renamed from `CryptoDjam` to `cyberservices-ai`, the Trusted Publishing configuration of **both** packages must be redone on npmjs.com (owner `cyberservices-ai`, repo `hermes-control`, workflow `publish.yml`); until then releases from GitHub Actions will be refused.
+**To do (Cyril, on npmjs.com, 2FA):** reconfigure Trusted Publishing of both packages for the owner `CyberServices-ai` (renamed from `CryptoDjam` on 2026-10-06).
 
 ## 4. Catalogue Paperclip Hub + awesome-paperclip
 - Hub : https://cliphub.fyi → *Submit a plugin* → nom npm `paperclip-plugin-hermes-control` (le Hub lit le manifeste depuis npm et vérifie que le compte soumis est mainteneur npm). Texte prêt : `docs/hub-submission.md`.

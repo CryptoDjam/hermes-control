@@ -41,12 +41,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CryptoDjam/hermes-control.git",
+    "url": "git+https://github.com/CyberServices-ai/hermes-control.git",
     "directory": "adapter"
   },
-  "homepage": "https://github.com/CryptoDjam/hermes-control#readme",
+  "homepage": "https://github.com/CyberServices-ai/hermes-control#readme",
   "bugs": {
-    "url": "https://github.com/CryptoDjam/hermes-control/issues"
+    "url": "https://github.com/CyberServices-ai/hermes-control/issues"
   },
   "keywords": [
     "paperclip",
