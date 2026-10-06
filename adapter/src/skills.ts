@@ -58,12 +58,38 @@ export async function desiredEntries(config: AnyRecord, requested?: string[]): P
 }
 
 /** Pose les liens des skills désirés dans `<profil>/skills`, retire ceux décochés (seulement s'ils pointent vers Paperclip). */
+const SAFE_RUNTIME_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Le dossier des skills du profil doit être DANS le profil (0.6.2) : `<profil>/skills` ne doit pas être un lien vers
+ * ailleurs (global `~/.hermes/skills`, profil d'une autre entreprise…). Retourne la raison du refus, ou null.
+ */
+export async function skillsDirProblem(profileHome: string): Promise<string | null> {
+  const realProfile = await realOrNull(profileHome);
+  if (!realProfile) return `profil ${profileHome} introuvable`;
+  const dir = profileSkillsDir(profileHome);
+  const st = await lstat(dir).catch(() => null);
+  if (!st) return null; // sera créé dans le profil
+  if (st.isSymbolicLink()) return `${dir} est un lien (vers ${(await realOrNull(dir)) ?? "?"}) : les skills seraient écrits hors du profil ; refus`;
+  if (!st.isDirectory()) return `${dir} n'est pas un dossier ; refus`;
+  const real = await realOrNull(dir);
+  if (real !== join(realProfile, "skills")) return `${dir} résout vers ${real ?? "?"}, hors du profil ; refus`;
+  return null;
+}
+
 export async function reconcileIntoProfile(config: AnyRecord, profileHome: string, requested?: string[]): Promise<ReconcileResult> {
   const skillsDir = profileSkillsDir(profileHome);
   const out: ReconcileResult = { skillsDir, desired: [], linked: [], removed: [], warnings: [] };
-  const { entries, desired } = await desiredEntries(config, requested);
+  const { entries: all, desired } = await desiredEntries(config, requested);
   out.desired = desired;
+  const entries: PaperclipSkillEntry[] = [];
+  for (const e of all) {
+    if (SAFE_RUNTIME_NAME.test(e.runtimeName) && e.runtimeName !== "..") entries.push(e);
+    else out.warnings.push(`Skill « ${e.runtimeName} » : nom de dossier refusé (hors du dossier des skills du profil).`);
+  }
   if (!entries.length) return out;
+  const problem = await skillsDirProblem(profileHome);
+  if (problem) throw new Error(problem);
   await mkdir(skillsDir, { recursive: true });
   const desiredSet = new Set(desired);
   const sourceOf = new Map<string, PaperclipSkillEntry>();
@@ -184,4 +210,28 @@ export async function snapshotForProfile(base: AdapterSkillSnapshot, profileHome
     });
   }
   return { ...base, entries };
+}
+
+/**
+ * Instantané des skills SANS lire le dossier global (0.6.2) : les skills gérés par Paperclip (inventaire envoyé par le
+ * serveur, lecture seule) ; l'officiel (`listHermesSkills`) parcourt `$HOME/.hermes/skills`, qui n'est pas lu par un
+ * agent lancé dans son profil, et n'est donc plus appelé. `desired` : liste demandée (syncSkills) sinon la configuration.
+ */
+export async function managedSnapshot(config: AnyRecord, requested?: string[]): Promise<AdapterSkillSnapshot> {
+  const { entries, desired } = await desiredEntries(config, requested);
+  const desiredSet = new Set(desired);
+  const out: AdapterSkillEntry[] = entries.map((e) => ({
+    key: e.key,
+    runtimeName: e.runtimeName,
+    desired: desiredSet.has(e.key),
+    managed: true,
+    state: desiredSet.has(e.key) ? "configured" : "available",
+    origin: "company_managed",
+    originLabel: "Managed by Paperclip",
+    readOnly: false,
+    sourcePath: e.source,
+    targetPath: null,
+    detail: null,
+  }));
+  return { adapterType: "hermes_local", supported: true, mode: "persistent", desiredSkills: desired, entries: out, warnings: [] } as AdapterSkillSnapshot;
 }

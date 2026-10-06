@@ -326,11 +326,15 @@ describe("affectation explicite (table assignments.json) — aucune affectation 
     expect(v.assignments.binary.ok).toBe(false);
     await expect(h.performAction("prepare-agent", { agentId: "agent-B", companyId: "B", instanceHome: instB }, user)).rejects.toThrow(/préparation refusée : binaire Hermes refusé/);
     await expect(stat(join(instB, "profiles"))).rejects.toThrow();
-    await expect(h.performAction("set-hermes-binary", { companyId: "A", binary: "/bin/bash" }, user)).rejects.toThrow(/binaire refusé/);
+    // 0.6.2 : le binaire GLOBAL n'est jamais réglable dans le périmètre d'une entreprise (contrat : appel sans entreprise = administrateur)
+    const tBefore = await readFile(assignmentsFile(), "utf8");
+    await expect(h.performAction("set-hermes-binary", { companyId: "A", binary: fake }, user)).rejects.toThrow(/opération GLOBALE réservée à l'administrateur d'instance.*rien n'est écrit/);
+    expect(await readFile(assignmentsFile(), "utf8")).toBe(tBefore);
+    await expect(h.performAction("set-hermes-binary", { binary: "/bin/bash" }, user)).rejects.toThrow(/binaire refusé/);
     expect(await fakeCalls(join(root, "bin"))).toEqual([]);
     await expect(stat(join(root, "hermes-config-set"))).rejects.toThrow();
-    // administré par l'action (board) → la synchro passe par lui
-    await h.performAction("set-hermes-binary", { companyId: "A", binary: fake }, user);
+    // administré par l'action d'un administrateur (sans entreprise) → la synchro passe par lui
+    await h.performAction("set-hermes-binary", { binary: fake }, user);
     const v2 = await h.getData<Data>("instances", { companyId: "A" });
     expect(v2.sync[0]!.changed).toEqual(["model.default"]);
     const calls = await fakeCalls(join(root, "bin"));
@@ -414,15 +418,35 @@ describe("affectation explicite (table assignments.json) — aucune affectation 
     expect(r2.health[home]).toMatchObject({ socketPathOk: true, socketBase: join(root, ".h", "d", "profiles", "assistant"), alerts: [] });
   });
 
-  it("set-telegram refuse quand une unité de passerelle existe pour un autre profil, et un chemin qui n'est pas un profil connu", async () => {
+  it("set-telegram (0.6.2) : désigné par l'AGENT affecté ; passerelle d'un autre profil → refus ; chemin libre, agent d'une autre entreprise, non affecté, profil différent → refus sans écriture", async () => {
     const units = join(root, ".config", "systemd", "user");
     await mkdir(units, { recursive: true });
     await writeFile(join(units, "hermes-gateway-x.service"), `[Service]\nEnvironment="HERMES_HOME=${join(root, "ailleurs", "x")}"\n`);
     const h = await start();
-    h.seed({ companies: [{ id: "co", name: "ACME" } as never], agents: [] });
-    await h.getData("instances", { companyId: "co" });
-    await expect(h.performAction("set-telegram", { home: instA, token: "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789abc" }, user)).rejects.toThrow(/tient déjà la passerelle.*hermes-gateway-x\.service/);
-    expect(await readFile(join(instA, ".env"), "utf8")).toBe("OPENAI_API_KEY=marqueur\n");
-    await expect(h.performAction("set-telegram", { home: join(root, "ailleurs"), token: "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789abc" }, user)).rejects.toThrow(/inconnu/);
+    seedTwo(h);
+    await setCompanyInstances("A", "Societe A", [instA]);
+    await setCompanyInstances("B", "Societe B", [instB]);
+    await assignAgent({ agentId: "agent-A", companyId: "A", instanceHome: instA, profile: "assistant", name: "Assistant", assignedBy: "u" });
+    const tok = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789abc";
+    const homeA = join(instA, "profiles", "assistant");
+    const envA = () => readFile(join(homeA, ".env"), "utf8").catch(() => "(absent)");
+    const before = await envA();
+    // ancien appel par chemin (0.6.1) : refusé
+    await expect(h.performAction("set-telegram", { companyId: "A", home: homeA, token: tok }, user)).rejects.toThrow(/agentId requis/);
+    // B vise l'agent de A (ou son profil) : refus
+    await expect(h.performAction("set-telegram", { companyId: "B", agentId: "agent-A", token: tok }, user)).rejects.toThrow(/introuvable dans cette entreprise/);
+    // B, agent non affecté
+    await expect(h.performAction("set-telegram", { companyId: "B", agentId: "agent-B", token: tok }, user)).rejects.toThrow(/non affecté/);
+    // A, profil demandé différent de celui de l'affectation
+    await expect(h.performAction("set-telegram", { companyId: "A", agentId: "agent-A", home: instA, token: tok }, user)).rejects.toThrow(/n'est pas celui de l'affectation/);
+    // paramètres contradictoires (contexte B, paramètre A)
+    await expect(h.performAction("set-telegram", { companyId: "A", agentId: "agent-A", token: tok }, { actor: { type: "user" as const, userId: "u1", companyId: "B" } })).rejects.toThrow(/paramètres contradictoires/);
+    // sans entreprise (administrateur) : action d'entreprise refusée
+    await expect(h.performAction("set-telegram", { agentId: "agent-A", token: tok }, user)).rejects.toThrow(/sans entreprise autorisée/);
+    expect(await envA()).toBe(before);
+    // le bon appel : garde-fou « une seule passerelle » (unité d'un autre profil) → refus, rien d'écrit
+    await expect(h.performAction("set-telegram", { companyId: "A", agentId: "agent-A", token: tok }, user)).rejects.toThrow(/tient déjà la passerelle.*hermes-gateway-x\.service/);
+    expect(await envA()).toBe(before);
+    expect(await fakeCalls(join(root, "bin"))).toEqual([]);
   });
 });

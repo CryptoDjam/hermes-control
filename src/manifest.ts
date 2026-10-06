@@ -4,7 +4,7 @@
 const manifest = {
   id: "hermes-control",
   apiVersion: 1,
-  version: "0.6.1",
+  version: "0.6.2",
   displayName: "Hermes Control",
   author: "Cyril M",
   // ≤ 500 caractères : Paperclip 2026.1001.0 refuse au-delà (« description: Too big ») ; vérifié par manifest.test.ts

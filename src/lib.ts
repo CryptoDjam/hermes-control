@@ -14,4 +14,4 @@ export { referenceInfo, describeReference } from "./reference.js";
 export { projectionProblem } from "./agents-map.js";
 export { matchAgent } from "./match.js";
 export { planMigration, parseAgentCommands, parseConfirm } from "./migrate.js";
-export { planRollback, applyRollback } from "./rollback.js";
+export { planRollback, applyRollback, checkExport, RollbackRefused, DEFAULT_EXPORT_MAX_AGE_MINUTES } from "./rollback.js";

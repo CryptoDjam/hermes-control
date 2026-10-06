@@ -1,6 +1,6 @@
 {
   "name": "paperclip-plugin-hermes-control",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "See and control your Hermes Agent instances from Paperclip: profiles, models, auth status, sessions, errors and guardrails — per agent.",
   "author": "Cyril M",
   "license": "MIT",

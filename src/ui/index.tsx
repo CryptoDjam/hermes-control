@@ -51,14 +51,16 @@ function useAct() {
 }
 
 /* ---------- Jeton Telegram d'un profil : saisi ici, écrit dans <profil>/.env, jamais réaffiché ---------- */
-function Telegram({ home, configured, onDone }: { home: string; configured: boolean; onDone: () => void }) {
+function Telegram({ agentId, configured, onDone }: { agentId: string | null; configured: boolean; onDone: () => void }) {
   const set = usePluginAction("set-telegram");
   const { busy, run } = useAct();
   const [open, setOpen] = React.useState(false);
   const [token, setToken] = React.useState("");
+  // 0.6.2 : le jeton s'enregistre pour un AGENT affecté de l'entreprise (vérifié par le worker), jamais pour un chemin
+  if (!agentId) return <span style={S.row}><span>{configured ? "configuré" : <span style={S.muted}>non</span>}</span><span style={S.muted}>(affecte un agent de l'entreprise à ce profil pour le régler)</span></span>;
   if (!open) return <span style={S.row}><span>{configured ? "configuré" : <span style={S.muted}>non</span>}</span><button style={S.btn} onClick={() => setOpen(true)}>{configured ? "changer" : "ajouter"}</button></span>;
   return (
-    <form style={S.row} onSubmit={(e) => { e.preventDefault(); void run(async () => { const r = (await set({ home, token })) as { gateway?: string }; setToken(""); setOpen(false); return `Jeton Telegram enregistré. ${r.gateway ?? ""}`; }, onDone); }}>
+    <form style={S.row} onSubmit={(e) => { e.preventDefault(); void run(async () => { const r = (await set({ agentId, token })) as { gateway?: string }; setToken(""); setOpen(false); return `Jeton Telegram enregistré. ${r.gateway ?? ""}`; }, onDone); }}>
       <input style={S.input} type="password" autoComplete="off" placeholder="123456789:AAAA… (jeton du bot)" value={token} onChange={(e) => setToken(e.target.value)} />
       <button style={S.btn} type="submit" disabled={busy || !token}>{busy ? "…" : "enregistrer"}</button>
       <button style={S.btn} type="button" onClick={() => { setOpen(false); setToken(""); }}>annuler</button>
@@ -235,7 +237,7 @@ export function HermesPage() {
                     <td style={S.td}><span style={{ color: p.approvalsMode === "off" ? "#ef4444" : "inherit" }}>{p.approvalsMode ?? "—"}</span></td>
                     <td style={S.td}><span style={{ color: p.terminalBackend === "local" ? "#eab308" : "inherit" }}>{p.terminalBackend ?? "—"}</span></td>
                     <td style={S.td}>{agents.length ? agents.map((a) => <span key={a.agentId} title={`${a.error ? a.error : a.changed.length ? `écrit : ${a.changed.join(", ")}` : "synchro à jour"}${a.cwd ? ` · dossier : ${a.cwd}` : ""}`} style={{ color: a.error ? "#ef4444" : "inherit" }}>{a.agentName}</span>).reduce<React.ReactNode[]>((acc, el, i) => (i ? [...acc, ", ", el] : [el]), []) : <span style={S.muted}>aucun</span>}</td>
-                    <td style={S.td}><Telegram home={p.home} configured={!!data.telegram?.[p.home]} onDone={refresh} /></td>
+                    <td style={S.td}><Telegram agentId={agents.find((a) => a.assignment && !/autre entreprise/.test(a.error ?? ""))?.agentId ?? null} configured={!!data.telegram?.[p.home]} onDone={refresh} /></td>
                   </tr>
                 );
               })}

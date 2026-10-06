@@ -409,13 +409,39 @@ async function mutate(change: (table: AssignmentsTable) => void | Promise<void>,
     for (const [id, why] of Object.entries(after.companies)) if (before.issues.companies[id] !== why) fresh.push(`entreprise ${id} : ${why}`);
     for (const [id, why] of Object.entries(after.agents)) if (before.issues.agents[id] !== why) fresh.push(`agent ${id} : ${why}`);
     for (const [id, why] of Object.entries(after.instances)) if (before.issues.instances[id] !== why) fresh.push(`instance ${id} : ${why}`);
+    // aucun NOUVEAU partage d'instance entre entreprises (0.6.2) ; un partage déjà présent reste un diagnostic
+    const sharedBefore = sharedInstances(before.table);
+    for (const [i, cids] of Object.entries(sharedInstances(table))) if (cids.some((c) => !(sharedBefore[i] ?? []).includes(c))) fresh.push(`partage : ${sharedInstanceDiagnostic(i, cids, table)}`);
     if (fresh.length) throw new Error(`affectation refusée : ${fresh.join(" ; ")}`);
     await writeTable(table);
     return table;
   });
 }
 
-/** Instances autorisées d'une entreprise (chemins canonicalisés, existants, dans les racines connues). */
+/**
+ * Instances rattachées à PLUSIEURS entreprises (0.6.2) : le partage n'est pas une fonction prise en charge. Une table qui
+ * en contient déjà (écrite avant la 0.6.2 ou à la main) produit un DIAGNOSTIC — jamais de réattribution ni de suppression
+ * automatique ; les réglages communs de ces instances (binaire, racine d'exécution) sont refusés tant que l'administrateur
+ * n'a pas tranché. Clé : instance (chemin tel qu'écrit dans la table, normalement canonique) → entreprises.
+ */
+export function sharedInstances(table: Pick<AssignmentsTable, "companies">): Record<string, string[]> {
+  const owners = new Map<string, string[]>();
+  for (const [cid, c] of Object.entries(table.companies)) for (const i of new Set(c.instances)) owners.set(i, [...(owners.get(i) ?? []), cid]);
+  const out: Record<string, string[]> = {};
+  for (const [i, cids] of owners) if (cids.length > 1) out[i] = cids.sort();
+  return out;
+}
+
+export function sharedInstanceDiagnostic(instance: string, companies: string[], table: Pick<AssignmentsTable, "companies">): string {
+  return `instance ${instance} rattachée à ${companies.length} entreprises (${companies.map((id) => `« ${table.companies[id]?.name ?? id} » ${id}`).join(", ")}) : partage non pris en charge (0.6.2) ; rien n'est réattribué ni supprimé automatiquement — l'administrateur retire l'instance de toutes les entreprises sauf une (action set-company-instances)`;
+}
+
+/**
+ * Instances autorisées d'une entreprise (chemins canonicalisés, existants, dans les racines connues). Depuis 0.6.2 une
+ * instance déjà rattachée à une AUTRE entreprise est refusée (aucune écriture) : pas de partage implicite, pas de
+ * réattribution. Une instance déjà partagée (table antérieure) peut rester dans la liste de l'entreprise qui l'a déjà
+ * (diagnostic), mais n'est jamais AJOUTÉE à une entreprise de plus.
+ */
 export async function setCompanyInstances(companyId: string, name: string, instances: string[], opts: { roots?: string[] } = {}): Promise<AssignmentsTable> {
   if (!companyId) throw new Error("companyId requis");
   const roots = opts.roots ?? (await knownRoots());
@@ -426,6 +452,12 @@ export async function setCompanyInstances(companyId: string, name: string, insta
     if (!canonical.includes(c.real)) canonical.push(c.real);
   }
   return mutate((table) => {
+    const already = new Set(table.companies[companyId]?.instances ?? []);
+    for (const i of canonical) {
+      if (already.has(i)) continue;
+      const others = Object.entries(table.companies).filter(([id, c]) => id !== companyId && c.instances.includes(i));
+      if (others.length) throw new Error(`affectation refusée : l'instance ${i} est déjà rattachée à ${others.map(([id, c]) => `l'entreprise « ${c.name} » (${id})`).join(", ")} ; le partage d'une instance entre entreprises n'est pas pris en charge (0.6.2) — rien n'est écrit, rien n'est réattribué`);
+    }
     const stillAssigned = Object.entries(table.agents).filter(([, a]) => a.companyId === companyId && !canonical.includes(a.instanceHome));
     if (stillAssigned.length) throw new Error(`affectation refusée : des agents de cette entreprise sont affectés à une instance retirée (${stillAssigned.map(([, a]) => `${a.name} → ${a.instanceHome}`).join(" ; ")}) ; désaffecte-les d'abord (${stillAssigned.map(([id]) => id).join(", ")})`);
     table.companies[companyId] = { name: name || table.companies[companyId]?.name || companyId, instances: canonical };
@@ -461,11 +493,17 @@ export async function assignAgent(input: AssignInput, opts: { roots?: string[] }
   return { ...a, agentId: input.agentId, home: profileHome(a.instanceHome, a.profile), execution: executionOf(table, a), hermes: hermesSpecFor(table, a.instanceHome), source: "table" };
 }
 
-export async function unassignAgent(agentId: string, opts: { roots?: string[] } = {}): Promise<boolean> {
+/**
+ * Retire l'affectation d'un agent. `companyId` (0.6.2, contexte d'action autorisé) : l'affectation, si elle existe, doit
+ * appartenir à cette entreprise — vérifié SOUS LE VERROU, avant toute écriture ; sinon refus, la table ne change pas.
+ */
+export async function unassignAgent(agentId: string, opts: { roots?: string[]; companyId?: string | null } = {}): Promise<boolean> {
   if (!agentId) throw new Error("agentId requis");
   let removed = false;
   await mutate((t) => {
-    removed = agentId in t.agents;
+    const a = t.agents[agentId];
+    if (a && opts.companyId !== undefined && a.companyId !== opts.companyId) throw new Error(`désaffectation refusée : l'agent ${agentId} est affecté pour une autre entreprise (${a.companyId}), pas pour ${opts.companyId ?? "(aucune)"} ; rien n'est écrit`);
+    removed = !!a;
     delete t.agents[agentId];
   }, opts.roots);
   return removed;
@@ -478,7 +516,8 @@ export async function replaceTable(table: AssignmentsTable, opts: { roots?: stri
   const roots = opts.roots ?? (await knownRoots());
   return withTableLock(async () => {
     const issues = await relationalIssues(p.table, roots);
-    const all = [...Object.entries(issues.instances).map(([id, w]) => `instance ${id} : ${w}`), ...Object.entries(issues.companies).map(([id, w]) => `entreprise ${id} : ${w}`), ...Object.entries(issues.agents).map(([id, w]) => `agent ${id} : ${w}`)];
+    const shared = Object.entries(sharedInstances(p.table)).map(([i, cids]) => `partage : ${sharedInstanceDiagnostic(i, cids, p.table)}`);
+    const all = [...shared, ...Object.entries(issues.instances).map(([id, w]) => `instance ${id} : ${w}`), ...Object.entries(issues.companies).map(([id, w]) => `entreprise ${id} : ${w}`), ...Object.entries(issues.agents).map(([id, w]) => `agent ${id} : ${w}`)];
     if (all.length) throw new Error(`table refusée : ${all.join(" ; ")}`);
     await writeTable(p.table);
     return p.table;

@@ -10,20 +10,26 @@
 //    racine d'exécution incohérente, socket trop long, -p dans extraArgs) est RENDU comme un échec `configuration_incomplete`
 //    (Paperclip 2026.1001.0 bloque alors le ticket pour un humain au lieu de replanifier) ; Hermes n'est pas appelé ;
 //  - les skills assignés à l'agent dans Paperclip sont liés dans `<profil>/skills` (là où Hermes les lit),
-//    à la synchro Paperclip et à chaque passage ; décochés → liens retirés.
+//    à la synchro Paperclip et à chaque passage ; décochés → liens retirés. 0.6.2 : profil résolu d'abord, jamais
+//    d'écriture ni de lecture dans `$HOME/.hermes/skills` (l'inventaire n'est plus transmis à l'adaptateur officiel) ;
+//  - 0.6.2 : « Test environment » STATIQUE (rien n'est exécuté) ; un échec d'authentification du MODÈLE est rendu
+//    `configuration_incomplete` (pas de relance en boucle), une panne transitoire reste réessayable.
+// 0.6.2 = recette seulement : l'environnement FINAL du processus Hermes n'est pas corrigé (variables du serveur héritées
+// par l'adaptateur officiel) ; déploiement bloqué.
 // Auteur : Cyril M — MIT.
 import { createHermesLocalServerAdapter } from "@paperclipai/hermes-paperclip-adapter";
 import { join } from "node:path";
 import { discoverLight } from "../../src/discovery.js";
 import { type HermesInstance, readModelCatalogs } from "../../src/hermes.js";
 import { agentsMapError } from "../../src/agents-map.js";
-import { assignmentsFile, resolveAssignment } from "../../src/assignments.js";
-import { describeBinary } from "../../src/binary.js";
-import { type ExecutionPlan, HermesControlRefusal, buildAgentEnv, checkExtraArgs, planExecution } from "../../src/execution.js";
+import { assignmentsFile, hermesSpecFor, readAssignments, resolveAssignment } from "../../src/assignments.js";
+import { describeBinary, verifyHermesBinary } from "../../src/binary.js";
+import { ADMINISTERED_ENV, type ExecutionPlan, HermesControlRefusal, NEUTRALIZED_ENV, buildAgentEnv, checkExtraArgs, planExecution } from "../../src/execution.js";
 import { slug } from "../../src/match.js";
 import { describeReference, referenceInfo } from "../../src/reference.js";
 import { exists, readWorkspace } from "../../src/workspace.js";
-import { reconcileIntoProfile, snapshotForProfile } from "./skills.js";
+import { type FailureClass, Tail, classifyFailure } from "./failure.js";
+import { managedSnapshot, reconcileIntoProfile, skillsDirProblem, snapshotForProfile } from "./skills.js";
 
 type AnyRecord = Record<string, unknown>;
 type Base = ReturnType<typeof createHermesLocalServerAdapter>;
@@ -90,8 +96,11 @@ function refusalResult(agent: { id?: string; name: string; companyId?: string | 
         // empreinte stable : un même refus répété réutilise la même action de reprise côté Paperclip
         fingerprint: `hermes_control:${refusal.kind}:${agent.id ?? "?"}`,
         missingBindings: [],
+        // texte exact du refus : le commentaire que Paperclip 2026.1001.0 pose sur le ticket est FIGÉ côté serveur
+        // (recovery/stranded-notice.js : « required secret/env bindings are missing ») et ne lit pas ce champ
+        message,
       },
-      hermesControl: { refused: true, kind: refusal.kind },
+      hermesControl: { refused: true, kind: refusal.kind, failureClass: "configuration" },
     },
   };
 }
@@ -106,10 +115,16 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
       const badArgs = checkExtraArgs(config["extraArgs"]);
       if (badArgs) throw new HermesControlRefusal("arguments", badArgs);
       plan = await planExecution(c.agent);
+      // skills : le dossier du profil affecté doit être dans le profil (sinon refus AVANT toute écriture)
+      if (Object.prototype.hasOwnProperty.call(config, "paperclipRuntimeSkills")) {
+        const problem = await skillsDirProblem(plan.assignment.home);
+        if (problem) throw new HermesControlRefusal("profile", `skills : ${problem}`);
+      }
     } catch (e) {
       if (e instanceof HermesControlRefusal) {
         const mapErr = await agentsMapError().catch(() => null);
-        const msg = `[hermes-control] « ${c.agent.name} » : refus (${e.kind}) : ${e.message}${mapErr ? ` — ${mapErr}` : ""} ; Hermes n'est pas lancé.`;
+        const head = e.kind === "not_assigned" ? `agent NON AFFECTÉ à un profil Hermes (ce n'est pas un secret manquant) : ${e.message}` : `refus (${e.kind}) : ${e.message}`;
+        const msg = `[hermes-control] « ${c.agent.name} » : ${head}${mapErr ? ` — ${mapErr}` : ""} ; Hermes n'est pas lancé.`;
         await c.onLog?.("stderr", msg + "\n");
         return refusalResult(c.agent, e, msg) as Awaited<ReturnType<Base["execute"]>>;
       }
@@ -143,9 +158,41 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
       } catch (err) {
         await c.onLog?.("stderr", `[hermes-control] skills Paperclip non liés dans le profil : ${err instanceof Error ? err.message : String(err)}\n`);
       }
+      // 0.6.2 : l'adaptateur officiel réconcilierait AUSSI ces skills dans `$HOME/.hermes/skills` (global, ou HOME venu de
+      // config.env) au démarrage du run : l'inventaire ne lui est pas transmis, la projection dans le profil suffit
+      delete config["paperclipRuntimeSkills"];
     }
-    return base.execute({ ...(ctx as object), config, agent: { ...(c.agent as object), adapterConfig: config } } as unknown as Parameters<Base["execute"]>[0]);
+    // sortie de Hermes gardée (fin seulement) pour classer un échec : authentification du modèle ≠ panne transitoire
+    const tail = new Tail();
+    const onLog = async (stream: "stdout" | "stderr", text: string) => {
+      tail.push(text);
+      await c.onLog?.(stream, text);
+    };
+    const result = await base.execute({ ...(ctx as object), config, onLog, agent: { ...(c.agent as object), adapterConfig: config } } as unknown as Parameters<Base["execute"]>[0]);
+    return classifyResult(result, tail.text(), c);
   };
+
+  /** Échec d'authentification du modèle → rendu `configuration_incomplete` (pas de relance) ; le reste inchangé, classe notée. */
+  async function classifyResult(result: Awaited<ReturnType<Base["execute"]>>, output: string, c: { agent: { id?: string; name: string; companyId?: string | null }; onLog?: (stream: "stdout" | "stderr", text: string) => Promise<void> | void }): Promise<Awaited<ReturnType<Base["execute"]>>> {
+    const r = result as { exitCode: number | null; timedOut: boolean; errorMessage?: string | null; errorCode?: string | null; resultJson?: Record<string, unknown> | null };
+    const failed = r.timedOut || (typeof r.exitCode === "number" && r.exitCode !== 0) || (r.exitCode === null && !!r.errorMessage);
+    if (!failed) return result;
+    const { cls, evidence } = classifyFailure(output, { exitCode: r.exitCode, timedOut: r.timedOut });
+    const resultJson: Record<string, unknown> = { ...(r.resultJson ?? {}) };
+    resultJson["hermesControl"] = { ...((resultJson["hermesControl"] as Record<string, unknown> | undefined) ?? {}), failureClass: cls satisfies FailureClass, evidence };
+    if (cls !== "model_auth") return { ...result, resultJson } as Awaited<ReturnType<Base["execute"]>>;
+    const msg = `[hermes-control] « ${c.agent.name} » : authentification du MODÈLE manquante ou expirée (Hermes : « ${evidence} ») ; reconnecte le profil (hermes auth / hermes model) — pas de relance automatique, le ticket attend une intervention.`;
+    await c.onLog?.("stderr", msg + "\n");
+    resultJson["configurationIncomplete"] = {
+      reason: "hermes_control_model_auth",
+      companyId: c.agent.companyId ?? null,
+      agentId: c.agent.id ?? null,
+      fingerprint: `hermes_control:model_auth:${c.agent.id ?? "?"}`,
+      missingBindings: [],
+      message: msg,
+    };
+    return { ...result, errorCode: REFUSAL_ERROR_CODE, errorMessage: msg, resultJson } as Awaited<ReturnType<Base["execute"]>>;
+  }
 
   const getConfigSchema: NonNullable<Base["getConfigSchema"]> = async () => {
     const schema = await base.getConfigSchema!();
@@ -159,27 +206,44 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
     return { ...schema, fields };
   };
 
+  /**
+   * « Test environment » (0.6.2) : diagnostic STATIQUE, soumis au même contrôle qu'un passage. Paperclip 2026.1001.0
+   * (routes/agents.js, POST /companies/:id/adapters/:type/test-environment) n'envoie que { companyId, adapterType, config,
+   * … } — aucun agent, donc aucune affectation à résoudre. L'adaptateur officiel lancerait `hermesCommand --version` (deux
+   * fois) puis `python3 --version` cherché dans le PATH : il n'est PLUS appelé. Rien n'est exécuté ici : on vérifie, sans
+   * le lancer, le binaire administré des instances de l'entreprise, et on signale ce qu'un passage refuserait ou ignorerait.
+   */
   const testEnvironment: Base["testEnvironment"] = async (ctx) => {
-    const result = await base.testEnvironment(ctx);
-    const list = await instances();
-    const summary = list.map((i) => `${i.name} (${i.profiles.map((p) => p.name).join(", ")})`).join(" · ");
-    result.checks.push({
-      code: "hermes_control.instances",
-      level: list.length ? "info" : "error",
-      message: list.length ? `Hermes Control : ${list.length} instance(s) trouvée(s)` : "Hermes Control : aucune instance Hermes trouvée",
-      detail: list.length ? summary : null,
-      hint: list.length ? `Un agent tourne seulement dans le profil qui lui est affecté explicitement (${assignmentsFile()}, écrit par les actions d'affectation du plugin Hermes Control), avec le binaire Hermes administré dans cette table.` : "Ajoute le dossier des instances dans <référence>/roots (une ligne par dossier).",
-    });
+    const t = ctx as unknown as { companyId?: string | null; config?: AnyRecord };
+    const config: AnyRecord = t.config ?? {};
+    const checks: { code: string; level: "info" | "warn" | "error"; message: string; detail?: string | null; hint?: string | null }[] = [];
+    checks.push({ code: "hermes_control.static", level: "info", message: "Hermes Control : diagnostic statique — aucune commande lancée (ni hermesCommand, ni `hermes`/`python3` du PATH)", detail: null, hint: "Un passage ne lance que le binaire administré de la table, après contrôle de l'affectation de l'agent." });
+    const cmd = [config["hermesCommand"], config["command"]].filter((x) => typeof x === "string" && (x as string).trim()) as string[];
+    if (cmd.length) checks.push({ code: "hermes_control.command_ignored", level: "warn", message: `Hermes Control : commande de l'agent ignorée (${cmd.join(", ")})`, detail: null, hint: "Retire hermesCommand : seul le binaire administré (assignments.json) est lancé." });
+    const envKeys = config["env"] && typeof config["env"] === "object" && !Array.isArray(config["env"]) ? Object.keys(config["env"] as AnyRecord) : [];
+    const reserved = envKeys.filter((k) => (ADMINISTERED_ENV as readonly string[]).includes(k) || (NEUTRALIZED_ENV as readonly string[]).includes(k));
+    if (reserved.length) checks.push({ code: "hermes_control.env_dropped", level: "warn", message: `Hermes Control : variables ignorées au passage (${reserved.join(", ")})`, detail: null, hint: "HERMES_HOME, PATH, PYTHON*, LD_* … sont administrés par Hermes Control." });
+    const badArgs = checkExtraArgs(config["extraArgs"]);
+    if (badArgs) checks.push({ code: "hermes_control.arguments", level: "error", message: `Hermes Control : ${badArgs}`, detail: null, hint: null });
     const ref = await referenceInfo();
-    result.checks.push({
-      code: "hermes_control.reference",
-      level: ref.legacyEnv.length ? "error" : "info",
-      message: `Hermes Control : ${describeReference(ref)}`,
-      detail: null,
-      hint: ref.legacyEnv.length ? `Retire ${ref.legacyEnv.join(", ")} de l'environnement du service : plus lues depuis 0.6.1.` : "Plugin et adaptateur lisent ce même dossier (calculé depuis le compte Unix, pas depuis l'environnement).",
-    });
-    if (!list.length || ref.legacyEnv.length) result.status = "fail";
-    return result;
+    checks.push({ code: "hermes_control.reference", level: ref.legacyEnv.length ? "error" : "info", message: `Hermes Control : ${describeReference(ref)}`, detail: null, hint: ref.legacyEnv.length ? `Retire ${ref.legacyEnv.join(", ")} de l'environnement du service : plus lues depuis 0.6.1.` : "Plugin et adaptateur lisent ce même dossier (calculé depuis le compte Unix, pas depuis l'environnement)." });
+    const read = await readAssignments();
+    const companyId = typeof t.companyId === "string" ? t.companyId : null;
+    if (read.error) checks.push({ code: "hermes_control.table", level: "error", message: `Hermes Control : ${read.error}`, detail: null, hint: "Aucun passage tant que la table n'est pas réparée." });
+    else {
+      const company = companyId ? read.table.companies[companyId] : undefined;
+      if (!company || !company.instances.length) checks.push({ code: "hermes_control.instances", level: "warn", message: "Hermes Control : aucune instance Hermes autorisée pour cette entreprise", detail: null, hint: `Déclare-les dans la page Hermes (table ${assignmentsFile()}), puis affecte l'agent.` });
+      else {
+        checks.push({ code: "hermes_control.instances", level: "info", message: `Hermes Control : ${company.instances.length} instance(s) autorisée(s) pour cette entreprise`, detail: company.instances.join(" · "), hint: "Un agent tourne seulement dans le profil qui lui est affecté explicitement." });
+        for (const i of company.instances) {
+          const v = await verifyHermesBinary(hermesSpecFor(read.table, i)); // lecture seule : rien n'est lancé
+          checks.push(v.ok ? { code: "hermes_control.binary", level: "info", message: `Hermes Control : binaire administré pour ${i.split("/").pop()} vérifié (non lancé)`, detail: describeBinary(v.ok), hint: null } : { code: "hermes_control.binary", level: "error", message: `Hermes Control : binaire refusé pour ${i.split("/").pop()} : ${v.error}`, detail: null, hint: "Aucun passage avec ce binaire." });
+        }
+      }
+    }
+    const hasErr = checks.some((x) => x.level === "error");
+    const hasWarn = checks.some((x) => x.level === "warn");
+    return { adapterType: "hermes_local", status: hasErr ? "fail" : hasWarn ? "warn" : "pass", checks, testedAt: new Date().toISOString() } as Awaited<ReturnType<Base["testEnvironment"]>>;
   };
 
   /** Profil Hermes d'un agent connu seulement par son id (listSkills / syncSkills) : table des affectations explicites. */
@@ -189,19 +253,23 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
   }
   const UNKNOWN_PROFILE = "Hermes Control : profil Hermes inconnu tant que l'agent n'est pas affecté explicitement (page Hermes → « Affecter » ou « Préparer l'agent ») ; les liens de skills seront posés dans son profil au prochain passage.";
 
+  // 0.6.2 : profil résolu D'ABORD ; ni lecture ni écriture du dossier global (`$HOME/.hermes/skills`) — l'officiel n'est
+  // plus appelé ; non affecté → instantané sans écriture, avec l'avertissement.
   const listSkills: NonNullable<Base["listSkills"]> = async (ctx) => {
-    const snap = await base.listSkills!(ctx);
     const p = await profileOf(ctx.agentId, (ctx as { companyId?: string | null }).companyId);
+    const snap = await managedSnapshot(ctx.config as AnyRecord);
     if (!p) return { ...snap, warnings: [...snap.warnings, UNKNOWN_PROFILE] };
     return snapshotForProfile(snap, p.home, p.label);
   };
 
   const syncSkills: NonNullable<Base["syncSkills"]> = async (ctx, desired) => {
-    const snap = await base.syncSkills!(ctx, desired);
     const p = await profileOf(ctx.agentId, (ctx as { companyId?: string | null }).companyId);
-    if (!p) return { ...snap, warnings: [...snap.warnings, UNKNOWN_PROFILE] };
-    const r = await reconcileIntoProfile(ctx.config, p.home, desired);
-    const out = await snapshotForProfile(snap, p.home, p.label);
+    if (!p) {
+      const snap = await managedSnapshot(ctx.config as AnyRecord, desired);
+      return { ...snap, warnings: [...snap.warnings, `${UNKNOWN_PROFILE} Aucun lien n'a été posé.`] };
+    }
+    const r = await reconcileIntoProfile(ctx.config as AnyRecord, p.home, desired);
+    const out = await snapshotForProfile(await managedSnapshot(ctx.config as AnyRecord, desired), p.home, p.label);
     return { ...out, warnings: [...out.warnings, ...r.warnings] };
   };
 
