@@ -263,8 +263,10 @@ describe("annulation (constat de recette 0.6.2) : signal du serveur → groupe d
     expect(order).toEqual(["ready", "spawn"]);
     expect(spawned).toEqual([hp]);
     ac.abort(new Error("Cancelled by control plane"));
-    const r = (await run) as { exitCode: number | null; signal: string | null };
+    const r = (await run) as { exitCode: number | null; signal: string | null; resultJson?: Record<string, { state?: string; proof?: string }> };
     expect(r.signal ?? r.exitCode).toBeTruthy();
+    // arrêt acquitté seulement parce que le groupe est vérifié vide (Paperclip l'exige pour confirmer l'annulation)
+    expect(r.resultJson?.["executionCancellation"]).toMatchObject({ state: "acknowledged", proof: "hermes_control_process_group_empty" });
     await new Promise((res) => setTimeout(res, 300));
     const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
     expect(alive(hp)).toBe(false);

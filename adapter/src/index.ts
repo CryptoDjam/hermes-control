@@ -178,7 +178,14 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
         return { exitCode: null, signal: null, timedOut: false, errorMessage: "[hermes-control] passage annulé avant le lancement de Hermes" } as Awaited<ReturnType<Base["execute"]>>;
       }
       const result = await base.execute({ ...(ctx as object), config, onLog, onSpawn: cancel.onSpawn, agent: { ...(c.agent as object), adapterConfig: config } } as unknown as Parameters<Base["execute"]>[0]);
-      if (cancel.aborted()) await c.onLog?.("stderr", "[hermes-control] passage annulé : groupe de processus de Hermes arrêté (SIGTERM, puis SIGKILL après le délai de grâce)\n");
+      if (cancel.aborted()) {
+        const stopped = await cancel.confirmStopped();
+        await c.onLog?.("stderr", stopped ? "[hermes-control] passage annulé : groupe de processus de Hermes arrêté et vérifié vide (SIGTERM, puis SIGKILL après le délai de grâce)\n" : "[hermes-control] passage annulé : des processus du groupe de Hermes sont ENCORE vivants après le délai de grâce ; arrêt NON acquitté\n");
+        const r = result as { resultJson?: Record<string, unknown> | null };
+        // acquittement exigé par Paperclip 2026.1001.0 pour confirmer l'arrêt (sinon : « provider termination could not be verified »)
+        if (stopped) return { ...result, resultJson: { ...(r.resultJson ?? {}), executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString(), proof: "hermes_control_process_group_empty" } } } as Awaited<ReturnType<Base["execute"]>>;
+        return result;
+      }
       return classifyResult(result, tail.text(), c);
     } finally {
       cancel.dispose();

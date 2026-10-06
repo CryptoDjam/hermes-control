@@ -19,7 +19,22 @@ export interface CancellationHandle {
   abortedBeforeStart: () => boolean;
   /** Abandon reçu pendant le passage. */
   aborted: () => boolean;
+  /**
+   * Après la fin du processus principal : le groupe de Hermes est-il VIDE (plus aucun processus, descendants compris) ?
+   * Attend au plus le délai de grâce + 2 s (SIGKILL envoyé entre-temps). Seul un groupe vérifié vide est « acquitté »
+   * auprès du serveur (resultJson.executionCancellation.state = "acknowledged").
+   */
+  confirmStopped: () => Promise<boolean>;
   dispose: () => void;
+}
+
+function groupAlive(target: { pid: number; processGroupId: number | null }): boolean {
+  try {
+    process.kill(target.processGroupId && target.processGroupId > 0 ? -target.processGroupId : target.pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 function killGroup(target: { pid: number; processGroupId: number | null }, signal: NodeJS.Signals): void {
@@ -66,6 +81,12 @@ export async function armCancellation(ctx: CancellationContext, graceMs: number)
       await ctx.onSpawn?.(meta);
     },
     abortedBeforeStart: () => requested && !started,
+    confirmStopped: async () => {
+      if (!spawned) return true;
+      const deadline = Date.now() + graceMs + 2_000;
+      while (groupAlive(spawned) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+      return !groupAlive(spawned);
+    },
     aborted: () => requested,
     dispose: () => {
       ctx.signal?.removeEventListener("abort", onAbort);
