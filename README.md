@@ -1,5 +1,7 @@
 # Hermes Control — Hermes Agent as the engine, Paperclip in charge
 
+> **Warning — `master` contains 0.6 in development: not installable and not yet acceptance-tested.** Install **0.5.0** from npm (`paperclip-plugin-hermes-control@0.5.0`, `paperclip-adapter-hermes-control@0.5.0`). 0.5.0 does not provide the 0.6 explicit-assignment guarantees.
+
 Source: https://github.com/CyberServices-ai/hermes-control · Author: Cyril M · MIT
 
 Run your [Paperclip](https://github.com/paperclipai/paperclip) agents on [Hermes Agent](https://github.com/NousResearch/hermes-agent) **without leaving Paperclip's own agent form**. Two small pieces, one project:
