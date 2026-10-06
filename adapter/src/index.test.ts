@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assignAgent, assignmentsFile, setCompanyInstances } from "../../src/assignments.js";
@@ -246,6 +246,32 @@ exec "$HERMES_BIN" "$@"
     await assignAgent({ agentId: "deep", companyId: "c", instanceHome: deepInst, profile: "x".repeat(20), name: "Deep", assignedBy: "u" });
     await expect(a.execute(ctxFor("deep", "Deep", []))).rejects.toThrow(/chemin de socket trop long.*gateway\.loop-tick\.4194304\.sock.*aucun passage/);
     expect(calls).toEqual([]);
+  });
+
+  it("lanceur-script au HERMES_HOME court par lien symbolique (`$HOME/.h/d/...` → racine profonde) : sockets mesurés sur le littéral → passe ; même profil sans lien (chemin long) → refus", async () => {
+    const { a, calls } = withSpy();
+    const deepInst = join(root, "p".repeat(Math.max(1, 70 - root.length - 1)));
+    const prof = "x".repeat(20);
+    const profile = join(deepInst, "profiles", prof);
+    await mkdir(profile, { recursive: true });
+    await writeFile(join(deepInst, "config.yaml"), "model: {}\n");
+    await writeFile(join(profile, "config.yaml"), "model: {}\n");
+    await mkdir(join(root, ".h"));
+    await symlink(deepInst, join(root, ".h", "d"));
+    await setCompanyInstances("c", "Societe C", [deepInst]);
+    await assignAgent({ agentId: "deep", companyId: "c", instanceHome: deepInst, profile: prof, name: "Deep", assignedBy: "u" });
+    // HOME = root dans ces tests : le lanceur de prod écrit `$HOME/.h/d/profiles/<profil>`
+    const viaLink = join(root, "hermes-deep-court");
+    await writeFile(viaLink, `#!/bin/bash\nexport HERMES_HOME="$HOME/.h/d/profiles/${prof}"\nexec hermes "$@"\n`);
+    await a.execute(ctxFor("deep", "Deep", [], { hermesCommand: viaLink }));
+    expect(calls).toHaveLength(1);
+    // le même profil écrit en chemin long → refus (c'est ce chemin que Hermes recevrait)
+    const longLauncher = join(root, "hermes-deep-long");
+    await writeFile(longLauncher, `#!/bin/bash\nexport HERMES_HOME="${profile}"\nexec hermes "$@"\n`);
+    await expect(a.execute(ctxFor("deep", "Deep", [], { hermesCommand: longLauncher }))).rejects.toThrow(/chemin de socket trop long.*aucun passage/);
+    // binaire approuvé : le home de l'affectation (long) est mesuré, comme avant → refus
+    await expect(a.execute(ctxFor("deep", "Deep", [], { hermesCommand: "hermes" }))).rejects.toThrow(/chemin de socket trop long/);
+    expect(calls).toHaveLength(1);
   });
 
   it("listSkills / syncSkills : profil inconnu → avertissement ; profil affecté → lien dans <profil>/skills", async () => {

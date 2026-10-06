@@ -126,9 +126,14 @@ function expand(value: string, vars: Record<string, string>): string | null {
   return missing ? null : out;
 }
 
-export type LauncherHome = { home: string; error: null } | { home: null; error: string };
+/**
+ * `home` : chemin réel (realpath) pour comparer avec l'affectation ; `literal` : HERMES_HOME tel qu'écrit dans le lanceur,
+ * après expansion des variables mais SANS realpath — c'est ce chemin que Hermes reçoit et sur lequel il lie ses sockets
+ * (un lien court `~/.h/d` vers une racine profonde garde des sockets courts).
+ */
+export type LauncherHome = { home: string; literal: string; error: null } | { home: null; literal: null; error: string };
 
-const launcherError = (error: string): LauncherHome => ({ home: null, error });
+const launcherError = (error: string): LauncherHome => ({ home: null, literal: null, error });
 
 /**
  * HERMES_HOME d'un lanceur (hermesCommand) par lecture STATIQUE du script, sans l'exécuter : ligne `HERMES_HOME=…`,
@@ -171,8 +176,8 @@ export async function homeFromLauncherFile(launcher: string): Promise<LauncherHo
   if (homes.length > 1) return launcherError(`lanceur ${path} : plusieurs HERMES_HOME (lignes ${homes.map((h) => h.line).join(", ")}) ; le shell appliquerait la dernière — refus`);
   const only = homes[0]!;
   if (!only.value) return launcherError(`lanceur ${path} : HERMES_HOME non résolu (ligne ${only.line} : variable inconnue, sous-shell ou valeur non littérale)`);
-  const home = resolve(only.value);
-  return { home: (await realpath(home).catch(() => null)) ?? home, error: null }; // chemin réel quand le dossier existe
+  const literal = resolve(only.value); // normalisé (., .., //) mais liens NON suivis
+  return { home: (await realpath(literal).catch(() => null)) ?? literal, literal, error: null }; // chemin réel quand le dossier existe
 }
 
 export function parseConfig(text: string): Record<string, unknown> {

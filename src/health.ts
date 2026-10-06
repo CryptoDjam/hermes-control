@@ -28,6 +28,7 @@ export interface SocketPathCheck {
   socketPathOk: boolean;
   longest: string; // le chemin qui donne la mesure
   sockets: string[]; // fichiers *.sock présents (relatifs à home : « x.sock », « state/y.sock »)
+  socketBase: string; // le dossier mesuré : HERMES_HOME littéral du lanceur quand il est connu, sinon le home du profil
 }
 
 export interface ProfileHealth extends SocketPathCheck {
@@ -100,20 +101,25 @@ export function expectedSocketPaths(home: string): string[] {
 
 /** Mesure (en octets UTF-8) des chemins attendus + de tout *.sock présent dans home et home/state. Pure lecture. */
 export async function checkSocketPaths(home: string): Promise<SocketPathCheck> {
+  const socketBase = home;
   const sockets = [...(await socketsIn(home, "")), ...(await socketsIn(join(home, "state"), "state/"))];
   const candidates = [...expectedSocketPaths(home), ...sockets.map((f) => join(home, f))];
   let longest = candidates[0]!;
   for (const c of candidates) if (Buffer.byteLength(c, "utf8") > Buffer.byteLength(longest, "utf8")) longest = c;
   const socketPathBytes = Buffer.byteLength(longest, "utf8");
-  return { socketPathBytes, socketPathOk: socketPathBytes <= SOCKET_PATH_MAX, longest, sockets };
+  return { socketPathBytes, socketPathOk: socketPathBytes <= SOCKET_PATH_MAX, longest, sockets, socketBase };
 }
 
 export function socketPathAlert(c: SocketPathCheck): string {
   return `chemin de socket trop long : ${c.socketPathBytes} octets (max ${SOCKET_PATH_MAX}, limite système ${SOCKET_SUN_PATH_LIMIT}) pour ${c.longest} — racine trop profonde`;
 }
 
-export async function checkProfile(home: string): Promise<ProfileHealth> {
-  const sock = await checkSocketPaths(home);
+/**
+ * `socketBase` : le HERMES_HOME littéral (sans realpath) que reçoit Hermes, quand le lanceur de l'agent affecté le donne —
+ * Hermes lie ses sockets sur ce chemin tel quel (un lien court vers une racine profonde est donc accepté). Sinon `home`.
+ */
+export async function checkProfile(home: string, socketBase: string = home): Promise<ProfileHealth> {
+  const sock = await checkSocketPaths(socketBase);
   const skills = await skillsOf(home);
   const { error: configError } = await readConfigStrict(home);
   const alerts: string[] = [];

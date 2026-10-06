@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SOCKET_PATH_MAX, WORST_CASE_PID, agentState, checkProfile, checkSkillHeader, checkSocketPaths, expectedSocketPaths } from "./health.js";
@@ -42,6 +42,25 @@ describe("checkProfile", () => {
     await mkdir(limit, { recursive: true });
     expect((await checkSocketPaths(limit)).socketPathBytes).toBe(100);
     expect((await checkSocketPaths(limit)).socketPathOk).toBe(true);
+  });
+
+  it("socketBase : lien court vers une racine profonde → mesuré sur le lien (OK) ; le même profil mesuré sur son chemin long → refus", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hc-h-"));
+    const deep = join(root, "x".repeat(80 - Buffer.byteLength(root) - 1));
+    await mkdir(join(deep, "state"), { recursive: true });
+    await writeFile(join(deep, "state", "gateway.loop-tick.12.sock"), "");
+    const short = join(root, "d");
+    await symlink(deep, short);
+    const viaLink = await checkProfile(deep, short);
+    expect(viaLink.socketBase).toBe(short);
+    expect(viaLink.socketPathOk).toBe(true);
+    expect(viaLink.longest).toBe(join(short, "state", "gateway.loop-tick.4194304.sock"));
+    expect(viaLink.sockets).toEqual(["state/gateway.loop-tick.12.sock"]); // les sockets présents se lisent à travers le lien
+    expect(viaLink.alerts).toEqual([]);
+    const direct = await checkProfile(deep);
+    expect(direct.socketBase).toBe(deep);
+    expect(direct.socketPathOk).toBe(false);
+    expect(direct.alerts.join(" ")).toMatch(/socket trop long/);
   });
 
   it("en-tête YAML des skills : valide, invalide, caché par `platforms:` ; config.yaml illisible", async () => {

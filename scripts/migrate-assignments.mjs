@@ -107,7 +107,7 @@ for (const dir of launcherDirs) {
     const binRaw = binMatch ? binMatch[1] : null;
     const binPath = binRaw ? binRaw.replace(/^\$HOME(?=\/|$)/, homedir()).replace(/^~(?=\/|$)/, homedir()) : null;
     const fallback = /HERMES_BIN="\$HOME\/\.local\/bin\/hermes"|command -v hermes/.test(text) ? "repli sur ~/.local/bin/hermes (ou PATH)" : null;
-    launchers.push({ path, home: r.home, error: r.error, homeReal: r.home ? (await realOrNull(r.home)) ?? r.home : null, binary: binPath, binaryExists: binPath ? await exists(binPath) : null, binaryFallback: fallback, hasProjetcOverride: /\$\{PROJETC:-/.test(text) });
+    launchers.push({ path, home: r.home, literal: r.literal ?? null, error: r.error, homeReal: r.home ? (await realOrNull(r.home)) ?? r.home : null, binary: binPath, binaryExists: binPath ? await exists(binPath) : null, binaryFallback: fallback, hasProjetcOverride: /\$\{PROJETC:-/.test(text) });
   }
 }
 
@@ -178,9 +178,11 @@ for (const [agentId, a] of Object.entries(legacy)) {
   else row.problems.push(`${matching.length} lanceurs mènent à ce profil : ${matching.map((l) => l.path).join(", ")}`);
   const acc = await modelAccount(instanceHome);
   row.account = acc.label;
-  const sock = await lib.checkSocketPaths(homeReal);
+  // Hermes lie ses sockets sur le HERMES_HOME littéral du lanceur (un lien court vers une racine profonde suffit)
+  const socketBase = matching.length === 1 && matching[0].literal ? matching[0].literal : homeReal;
+  const sock = await lib.checkSocketPaths(socketBase);
   row.socketBytes = sock.socketPathBytes;
-  if (!sock.socketPathOk) warnings.push(`${a.name} (${homeReal}) : chemin de socket le plus long = ${sock.socketPathBytes} octets > ${lib.SOCKET_PATH_MAX} (${sock.longest}) : l'adaptateur REFUSERA ce profil au démarrage`);
+  if (!sock.socketPathOk) warnings.push(`${a.name} (${socketBase}) : chemin de socket le plus long = ${sock.socketPathBytes} octets > ${lib.SOCKET_PATH_MAX} (${sock.longest}) : l'adaptateur REFUSERA ce profil au démarrage`);
   const key = `${instanceHome}|${profile}`;
   claims.set(key, [...(claims.get(key) ?? []), agentId]);
   rows.push(row);

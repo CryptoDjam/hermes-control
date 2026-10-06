@@ -62,7 +62,8 @@ exec "$HERMES_BIN" "$@"
     const launcher = join(bin, "hermes-cmo");
     await writeFile(launcher, REAL_FORM("$PROJETC/hermes/profils/marketing"), { mode: 0o644 });
     expect((await stat(launcher)).mode & 0o111).toBe(0); // pas exécutable : la lecture est forcément statique
-    expect(await homeFromLauncherFile(launcher)).toEqual({ home: join(root, "ProjetC", "hermes", "profils", "marketing"), error: null });
+    const marketing = join(root, "ProjetC", "hermes", "profils", "marketing");
+    expect(await homeFromLauncherFile(launcher)).toEqual({ home: marketing, literal: marketing, error: null });
   });
 
   it("résout $HOME, ${HOME}, ~ et une variable affectée littéralement plus haut", async () => {
@@ -92,6 +93,29 @@ exec "$HERMES_BIN" "$@"
     await symlink(join(root, "reel"), join(root, "lien"));
     await writeFile(join(root, "ln"), `HERMES_HOME=${join(root, "lien")}\n`);
     expect((await homeFromLauncherFile(join(root, "ln"))).home).toBe(join(root, "reel"));
+    expect((await homeFromLauncherFile(join(root, "ln"))).literal).toBe(join(root, "lien"));
+  });
+
+  it("lien court vers une racine profonde (forme de prod `$HOME/.h/d/profiles/assistant`) : home = chemin réel, literal = chemin tel qu'écrit (sockets)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hc-launcher-"));
+    const savedHome = process.env["HOME"];
+    process.env["HOME"] = root;
+    try {
+      const deep = join(root, "Projects", "ProjetC", "hermes", "profils", "direction");
+      await mkdir(join(deep, "profiles", "assistant"), { recursive: true });
+      await mkdir(join(root, ".h"));
+      await symlink(deep, join(root, ".h", "d"));
+      const launcher = join(root, "hermes-assistant");
+      await writeFile(launcher, '#!/bin/bash\nexport HERMES_HOME="$HOME/.h/d/profiles/assistant"\nexec hermes "$@"\n');
+      const r = await homeFromLauncherFile(launcher);
+      expect(r).toEqual({ home: join(deep, "profiles", "assistant"), literal: join(root, ".h", "d", "profiles", "assistant"), error: null });
+      expect(r.home).not.toBe(r.literal);
+      // ~ et ./.. sont normalisés, mais le lien n'est jamais suivi dans literal
+      await writeFile(launcher, "export HERMES_HOME=~/.h/d/profiles/../profiles/assistant\n");
+      expect((await homeFromLauncherFile(launcher)).literal).toBe(join(root, ".h", "d", "profiles", "assistant"));
+    } finally {
+      process.env["HOME"] = savedHome;
+    }
   });
 
   it("INCERTITUDE = ERREUR : variable non résolue (sonde Codex n°2), deux HERMES_HOME (sonde n°3), pas de HERMES_HOME, sous-shell, absent, trop gros", async () => {

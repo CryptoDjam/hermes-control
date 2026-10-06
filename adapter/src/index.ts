@@ -109,15 +109,19 @@ async function assignmentOf(agent: { id?: string; name: string; companyId?: stri
   if (error) throw new Error(`[hermes-control] « ${name} » : ${rec.home}/${error} ; aucun passage tant que le fichier n'est pas réparé.`);
   const unusable = await profileUsability(rec.instanceHome, rec.profile);
   if (unusable) throw new Error(`[hermes-control] « ${name} » : ${unusable} ; aucun passage.`);
-  const sock = await checkSocketPaths(rec.home);
-  if (!sock.socketPathOk) throw new Error(`[hermes-control] « ${name} » : ${socketPathAlert(sock)} ; aucun passage (le watchdog de Hermes ne pourrait pas ouvrir son socket).`);
+  // Hermes lie ses sockets sur HERMES_HOME tel que reçu (sans realpath) : pour un script lanceur, c'est le HERMES_HOME
+  // littéral du script qui compte (un lien court vers une racine profonde est accepté) ; pour un binaire, le home affecté.
+  let socketBase = rec.home;
   if (command && !isApprovedBinary(command, { approvedBinaries: r.approvedBinaries })) {
     // un script lanceur : toute incertitude est un refus, jamais une conformité
     const fromLauncher = await homeFromLauncherFile(command);
     if (fromLauncher.home === null) throw new Error(`[hermes-control] « ${name} » : lanceur incertain, refus : ${fromLauncher.error}. Déclare un binaire Hermes approuvé (HERMES_CONTROL_HERMES_BIN ou approvedBinaries dans ${assignmentsFile()}) ou corrige le lanceur.`);
     const [a, b] = await Promise.all([realOrResolved(rec.home), realOrResolved(fromLauncher.home)]);
     if (a !== b) throw new Error(`[hermes-control] « ${name} » : affectation (table) ≠ lanceur : ${a} vs ${b} (${command}) ; corrige l'un ou l'autre.`);
+    socketBase = fromLauncher.literal;
   }
+  const sock = await checkSocketPaths(socketBase);
+  if (!sock.socketPathOk) throw new Error(`[hermes-control] « ${name} » : ${socketPathAlert(sock)} ; aucun passage (le watchdog de Hermes ne pourrait pas ouvrir son socket).`);
   return rec;
 }
 

@@ -91,7 +91,7 @@ const plugin = definePlugin({
   async setup(ctx: PluginContext) {
     const log = ctx.logger;
     const BINARY = hermesBinary();
-    const launcherHomes = new Map<string, string>(); // clé : chemin + mtime du lanceur ; jamais d'erreur en cache
+    const launcherHomes = new Map<string, { home: string; literal: string }>(); // clé : chemin + mtime du lanceur ; jamais d'erreur en cache
 
     /** Agents Hermes de l'entreprise, réduits aux données utiles. */
     async function snapshotAgents(companyId: string): Promise<AgentSnapshot[]> {
@@ -110,15 +110,38 @@ const plugin = definePlugin({
     }
 
     /** HERMES_HOME d'un lanceur, lu statiquement ; cache invalidé dès que le fichier change (mtime) ; une erreur n'est pas cachée. */
-    async function launcherHome(launcher: string): Promise<string | null> {
+    async function launcherHomeOf(launcher: string): Promise<{ home: string; literal: string } | null> {
       const st = await stat(launcher).catch(() => null);
       if (!st) return null;
       const key = `${launcher}@${st.mtimeMs}`;
       const cached = launcherHomes.get(key);
       if (cached) return cached;
       const r = await homeFromLauncherFile(launcher);
-      if (r.home) launcherHomes.set(key, r.home);
-      return r.home;
+      if (r.home === null) return null;
+      const v = { home: r.home, literal: r.literal };
+      launcherHomes.set(key, v);
+      return v;
+    }
+    const launcherHome = async (launcher: string): Promise<string | null> => (await launcherHomeOf(launcher))?.home ?? null;
+
+    /**
+     * Chemin réel du profil → HERMES_HOME littéral du lanceur de l'agent qui y est affecté (le lanceur doit viser ce profil).
+     * Hermes lie ses sockets sur ce littéral : c'est lui qu'on mesure. Plusieurs agents sur un profil : le plus long.
+     */
+    async function socketBases(snap: AgentSnapshot[], sync: SyncRecord[]): Promise<Map<string, string>> {
+      const out = new Map<string, string>();
+      for (const s of sync) {
+        if (!s.assignment || !s.home) continue;
+        const launcher = snap.find((a) => a.agentId === s.agentId)?.launcher;
+        if (!launcher) continue;
+        const l = await launcherHomeOf(launcher);
+        if (!l) continue;
+        const real = await realOrResolved(s.home);
+        if ((await realOrResolved(l.home)) !== real) continue;
+        const prev = out.get(real);
+        if (!prev || Buffer.byteLength(l.literal, "utf8") > Buffer.byteLength(prev, "utf8")) out.set(real, l.literal);
+      }
+      return out;
     }
 
     /** Instances : racines configurées (~/.hermes, roots) + celles lues STATIQUEMENT dans les lanceurs des agents (jamais exécutés). */
@@ -235,12 +258,13 @@ const plugin = definePlugin({
     }
 
     /** Santé par profil (lecture seule) et état par agent (installé / connecté / connecté et synchronisé). */
-    async function healthOf(list: HermesInstance[], sync: SyncRecord[]): Promise<{ health: Record<string, ProfileHealth>; states: Record<string, AgentState>; alerts: string[] }> {
+    async function healthOf(list: HermesInstance[], sync: SyncRecord[], snap: AgentSnapshot[]): Promise<{ health: Record<string, ProfileHealth>; states: Record<string, AgentState>; alerts: string[] }> {
       const health: Record<string, ProfileHealth> = {};
       const alerts: string[] = [];
+      const bases = await socketBases(snap, sync);
       for (const i of list) {
         for (const p of i.profiles) {
-          health[p.home] = await checkProfile(p.home);
+          health[p.home] = await checkProfile(p.home, bases.get(await realOrResolved(p.home)) ?? p.home);
           for (const a of health[p.home]!.alerts) alerts.push(`${i.name}/${p.name} : ${a}`);
         }
       }
@@ -262,7 +286,7 @@ const plugin = definePlugin({
     healthProbe = async () => {
       const snap = ((await ctx.state.get(SNAPSHOT_KEY)) as AgentSnapshot[] | null) ?? [];
       const sync = ((await ctx.state.get(SYNC_KEY)) as SyncRecord[] | null) ?? [];
-      return (await healthOf(await instances(snap, true), sync)).alerts;
+      return (await healthOf(await instances(snap, true), sync, snap)).alerts;
     };
 
     // ---- la seule donnée pour l'interface : lecture + synchro des agents AFFECTÉS ; n'affecte, ne prépare et n'écrit la table JAMAIS ----
@@ -275,7 +299,7 @@ const plugin = definePlugin({
       const ws = await readWorkspace();
       const telegram: Record<string, boolean> = {};
       for (const i of list) for (const p of i.profiles) telegram[p.home] = await telegramConfigured(p.home);
-      const { health, states } = await healthOf(list, sync);
+      const { health, states } = await healthOf(list, sync, snap);
       const read = await readAssignments();
       const company: CompanyEntry | null = read.table.companies[companyId] ?? null;
       const assignments: { file: string; error: string | null; company: CompanyEntry | null; issues: TableIssues } = { file: assignmentsFile(), error: read.error, company, issues: read.issues };

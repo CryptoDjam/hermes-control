@@ -12,7 +12,7 @@ interface Suggestion { instance: string; instanceHome: string; profile: string; 
 interface Sync { agentId: string; companyId: string; agentName: string; instance: string | null; profile: string | null; home: string | null; assignment: Assignment | null; suggestion: Suggestion | null; want: { provider: string | null; model: string | null; thinking: string | null }; cwd: string | null; changed: string[]; error: string | null; prepared: string[] | null; at: string }
 interface Workspace { root: string; profils: string; skills: string; modeles: string; agents: string }
 type AgentState = "installed" | "connected" | "synced";
-interface Health { socketPathBytes: number; socketPathOk: boolean; longest: string; skills: { name: string; yamlOk: boolean; hiddenByPlatforms: boolean }[]; configError: string | null; alerts: string[] }
+interface Health { socketPathBytes: number; socketPathOk: boolean; longest: string; socketBase: string; skills: { name: string; yamlOk: boolean; hiddenByPlatforms: boolean }[]; configError: string | null; alerts: string[] }
 interface Company { name: string; instances: string[] }
 interface Assignments { file: string; error: string | null; company: Company | null; issues: { companies: Record<string, string>; agents: Record<string, string> } }
 interface Data { instances: Instance[]; sync: Sync[]; workspace: Workspace | null; telegram: Record<string, boolean>; health: Record<string, Health>; states: Record<string, AgentState>; assignments: Assignments }

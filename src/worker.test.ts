@@ -324,6 +324,35 @@ exit 0
     expect(r3.instances.map((i) => i.name).sort()).toEqual(["societe-a", "societe-b"]); // deux HERMES_HOME : incertain → rien d'ajouté
   });
 
+  it("santé : un agent affecté dont le lanceur passe par un lien court (`$HOME/.h/d/...`) → sockets mesurés sur ce littéral (socketBase) ; lanceur au chemin long → alerte", async () => {
+    const { symlink, utimes } = await import("node:fs/promises");
+    const instL = join(root, "ws", "hermes", "profils", "d".repeat(30));
+    const home = join(instL, "profiles", "assistant");
+    await mkdir(home, { recursive: true });
+    await writeFile(join(instL, "config.yaml"), "model: {}\n");
+    await writeFile(join(home, "config.yaml"), "model: {}\n");
+    await mkdir(join(root, ".h"));
+    await symlink(instL, join(root, ".h", "d"));
+    const literal = join(root, ".h", "d", "profiles", "assistant");
+    const launcher = join(root, "bin", "hermes-assistant");
+    await writeFile(launcher, '#!/bin/bash\nexport HERMES_HOME="$HOME/.h/d/profiles/assistant"\nexec hermes "$@"\n', { mode: 0o644 });
+    await setCompanyInstances("co", "ACME", [instL]);
+    await assignAgent({ agentId: "a1", companyId: "co", instanceHome: instL, profile: "assistant", name: "Assistant", assignedBy: "u" });
+    const h = await start();
+    h.seed({ companies: [{ id: "co", name: "ACME" } as never], agents: [{ id: "a1", companyId: "co", name: "Assistant", adapterType: "hermes_local", adapterConfig: { hermesCommand: launcher }, status: "idle" } as never] });
+    type H = { health: Record<string, { socketPathOk: boolean; socketBase: string; alerts: string[] }> };
+    const r1 = await h.getData<H>("instances", { companyId: "co" });
+    expect(r1.health[home]).toMatchObject({ socketPathOk: true, socketBase: literal, alerts: [] });
+    // le même profil, lanceur sans lien (chemin long) → refus
+    await writeFile(launcher, `#!/bin/bash\nexport HERMES_HOME="${home}"\nexec hermes "$@"\n`, { mode: 0o644 });
+    const later = new Date(Date.now() + 5_000);
+    await utimes(launcher, later, later);
+    const r2 = await h.getData<H>("instances", { companyId: "co" });
+    expect(r2.health[home]?.socketPathOk).toBe(false);
+    expect(r2.health[home]?.socketBase).toBe(home);
+    expect(r2.health[home]?.alerts.join(" ")).toMatch(/socket trop long/);
+  });
+
   it("set-telegram refuse quand une unité de passerelle existe pour un autre profil, et un chemin qui n'est pas un profil connu", async () => {
     const units = join(root, ".config", "systemd", "user");
     await mkdir(units, { recursive: true });
