@@ -139,3 +139,12 @@ Tests never touch the real reference: `vitest.setup.ts` redirects the account ho
 
 ## License
 MIT © Cyril M
+
+## Known limitations (0.6.2 — acceptance build, not for production)
+
+- **Agent environment not filtered yet.** The Paperclip adapter path still passes the server's environment to the Hermes process: in the 0.6.2 acceptance run, fictitious sentinels set on the server and in `config.env` (and names such as `PAPERCLIP_AGENT_JWT_SECRET`, `BETTER_AUTH_SECRET`) reached the final Hermes process. Two prototype fixes exist (upstream patch / maintained copy), none chosen. **Do not deploy 0.6.x until this is fixed**: 0.6.x bypasses launcher scripts, so it would also bypass any `unset` placed in them.
+- **Same Unix user.** Paperclip, Hermes and the agents run as one user: an agent can read the files of that user (Paperclip `.env`, secrets master key, SSH keys…). A dedicated account is planned, not done.
+- **`local_trusted` mode** has no authentication: company checks cannot be proven there; use `authenticated` mode.
+- **Embedded PostgreSQL** of Paperclip uses fixed local credentials.
+- **Administered binary check** verifies the Hermes entry point and its fingerprint, not every Python module it imports.
+- Production users should stay on **0.5.0** (npm `latest`).
