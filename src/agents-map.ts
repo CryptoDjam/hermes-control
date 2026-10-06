@@ -1,22 +1,30 @@
-// Carte agentId Paperclip → profil Hermes (« affectation »), partagée par le plugin et l'adaptateur.
-// Pourquoi : Paperclip appelle listSkills / syncSkills avec seulement l'identifiant de l'agent (pas son nom) ;
-// et depuis la 0.6 l'adaptateur refuse de lancer un agent qui n'y figure pas (R02b : affectation contrôlée avant réveil).
-// Écrite par le plugin à chaque synchro / préparation, sous verrou ; un fichier corrompu n'est jamais réécrit.
+// `~/.config/hermes-control/agents.json` : PROJECTION DÉRIVÉE de la table d'affectations (assignments.json), jamais une
+// source. Écrite uniquement par le plugin (sous le verrou de la table) à partir de la table ; elle porte l'empreinte
+// (`derivedFrom.sha256`) du fichier dont elle dérive. L'adaptateur lit la table directement et n'utilise la projection
+// qu'en secours, si son empreinte est celle de la table présente. Une projection ancienne (format plat de la 0.4–0.6.0,
+// sans schemaVersion ni derivedFrom) ou corrompue est ignorée et signalée : jamais utilisée comme affectation valide.
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { withDirLock } from "./lock.js";
 import { controlDir } from "./paths.js";
+import type { AssignmentsTable, CompanyEntry } from "./assignments.js";
 
-export interface RememberedAgent {
+export interface ProjectionAgent {
   name: string;
-  instance: string;
+  companyId: string;
+  instance: string; // nom de l'instance (basename)
+  instanceHome: string;
   profile: string;
-  home: string;
-  at: string;
+  home: string; // racine du profil (HERMES_HOME au passage)
+  at: string; // assignedAt
+  by: string; // assignedBy
 }
 
-const LOCK_WAIT_MS = 2_000; // délai maximal d'attente du verrou
-const LOCK_STALE_MS = 30_000; // au-delà, un verrou oublié (processus mort) est repris
+export interface Projection {
+  schemaVersion: 1;
+  derivedFrom: { file: string; sha256: string; at: string };
+  companies: Record<string, CompanyEntry>;
+  agents: Record<string, ProjectionAgent>;
+}
 
 /** Calculé à l'appel (pas à l'import) : HERMES_CONTROL_AGENTS_MAP si défini, sinon ~/.config/hermes-control/agents.json. */
 export function agentsMapFile(): string {
@@ -24,57 +32,49 @@ export function agentsMapFile(): string {
   return env || join(controlDir(), "agents.json");
 }
 
-/** Absent → carte vide ; présent mais pas un objet JSON valide → `error` (le fichier reste tel quel). */
-async function readMap(): Promise<{ map: Record<string, RememberedAgent>; error: string | null }> {
+/** Absent → null sans erreur ; projection valide → objet ; format ancien ou corrompu → `error` (le fichier reste tel quel). */
+export async function readProjection(): Promise<{ projection: Projection | null; error: string | null }> {
   let text: string;
   try {
     text = await readFile(agentsMapFile(), "utf8");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { map: {}, error: null };
-    return { map: {}, error: `agents.json illisible : ${(e as Error).message}` };
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { projection: null, error: null };
+    return { projection: null, error: `agents.json illisible : ${(e as Error).message}` };
   }
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(text) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { map: {}, error: "agents.json corrompu : le contenu n'est pas un objet JSON" };
-    return { map: parsed as Record<string, RememberedAgent>, error: null };
+    parsed = JSON.parse(text);
   } catch (e) {
-    return { map: {}, error: `agents.json corrompu : ${(e as Error).message}` };
+    return { projection: null, error: `agents.json corrompu : ${(e as Error).message}` };
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { projection: null, error: "agents.json corrompu : le contenu n'est pas un objet JSON" };
+  const p = parsed as Partial<Projection>;
+  if (p.schemaVersion !== 1 || !p.derivedFrom || typeof p.derivedFrom !== "object" || typeof p.derivedFrom.sha256 !== "string") {
+    return { projection: null, error: `agents.json : projection ancienne ou sans empreinte (schemaVersion/derivedFrom absents) ; ignorée — relance la migration (scripts/migrate-assignments.mjs) ou une action d'affectation` };
+  }
+  if (!p.agents || typeof p.agents !== "object" || Array.isArray(p.agents)) return { projection: null, error: "agents.json : projection sans table `agents`" };
+  return { projection: { schemaVersion: 1, derivedFrom: { file: String(p.derivedFrom.file ?? ""), sha256: p.derivedFrom.sha256, at: String(p.derivedFrom.at ?? "") }, companies: (p.companies && typeof p.companies === "object" ? p.companies : {}) as Record<string, CompanyEntry>, agents: p.agents as Record<string, ProjectionAgent> }, error: null };
 }
 
-/** Verrou autour d'une lecture-modification-écriture de la carte. */
-function withMapLock<T>(fn: () => Promise<T>): Promise<T> {
-  const lock = `${agentsMapFile()}.lock`;
-  return withDirLock(lock, { waitMs: LOCK_WAIT_MS, staleMs: LOCK_STALE_MS, busy: `agents.json : verrou tenu trop longtemps (${lock})` }, fn);
+/** Projection calculée depuis la table (pure). */
+export function projectionOf(table: AssignmentsTable, sourceFile: string, sha256: string, profileHomeOf: (instanceHome: string, profile: string) => string): Projection {
+  const agents: Record<string, ProjectionAgent> = {};
+  for (const [agentId, a] of Object.entries(table.agents)) {
+    agents[agentId] = { name: a.name, companyId: a.companyId, instance: a.instanceHome.split("/").filter(Boolean).pop() ?? a.instanceHome, instanceHome: a.instanceHome, profile: a.profile, home: profileHomeOf(a.instanceHome, a.profile), at: a.assignedAt, by: a.assignedBy };
+  }
+  return { schemaVersion: 1, derivedFrom: { file: sourceFile, sha256, at: new Date().toISOString() }, companies: table.companies, agents };
 }
 
-/** Mémorise l'affectation d'un agent. Refuse (erreur explicite, fichier intact) si agents.json est corrompu. */
-export async function rememberAgent(agentId: string, m: Omit<RememberedAgent, "at">): Promise<void> {
-  if (!agentId) return;
-  await withMapLock(async () => {
-    const { map, error } = await readMap();
-    if (error) throw new Error(`${error} ; rien n'est écrit — répare ou supprime ${agentsMapFile()}`);
-    const prev = map[agentId];
-    if (prev && prev.home === m.home && prev.name === m.name && prev.instance === m.instance && prev.profile === m.profile) return;
-    map[agentId] = { ...m, at: new Date().toISOString() };
-    const file = agentsMapFile();
-    await mkdir(dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    await writeFile(tmp, JSON.stringify(map, null, 2) + "\n", { mode: 0o600 });
-    await rename(tmp, file);
-  });
-}
-
-/** Affectation d'un agent ; null si inconnu ou si agents.json est corrompu (voir agentsMapError). */
-export async function recallAgent(agentId: string): Promise<RememberedAgent | null> {
-  if (!agentId) return null;
-  const { map, error } = await readMap();
-  if (error) return null;
-  const r = map[agentId];
-  return r && typeof r === "object" && typeof r.home === "string" ? r : null;
+/** Écriture atomique (tmp + rename, mode 600). À appeler sous le verrou de la table seulement. */
+export async function writeProjection(projection: Projection): Promise<void> {
+  const file = agentsMapFile();
+  await mkdir(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(projection, null, 2) + "\n", { mode: 0o600 });
+  await rename(tmp, file);
 }
 
 /** Erreur de lecture de agents.json (null si absent ou valide) : pour l'afficher sans la confondre avec « agent inconnu ». */
 export async function agentsMapError(): Promise<string | null> {
-  return (await readMap()).error;
+  return (await readProjection()).error;
 }

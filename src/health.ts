@@ -1,15 +1,21 @@
 // Santé d'un profil Hermes et état d'un agent, en lecture seule (aucune commande hermes) :
-//  - longueur réelle du chemin des sockets (limite AF_UNIX 108 octets, cible ≤ 100) ;
+//  - longueur réelle des chemins de sockets de la version épinglée (limite AF_UNIX 108 octets, cible ≤ 100), mesurée
+//    AVANT tout démarrage, sans attendre qu'un socket existe : `<home>/gateway.sock`, le socket du watchdog
+//    `<home>/state/gateway.loop-tick.<pid>.sock` (Hermes 0.21.5, gateway/shutdown_watchdog.py) avec un pid de 7 chiffres
+//    (pire cas Linux : pid_max 4194304), et tout `*.sock` déjà présent dans `home` et `home/state` ;
 //  - en-tête YAML de chaque skill (un en-tête invalide avec `platforms:` cache la skill sans bruit) ;
 //  - config.yaml illisible ;
-//  - trois états par agent : installé (profil présent) / connecté (authStatus logged_in) / autorisé (connecté + dernière synchro sans erreur).
-//    (« autorisé et testé », avec un test de connexion à cas négatif, reste à faire : voir README.)
+//  - trois états par agent : installé (profil présent) / connecté (authStatus logged_in) / connecté et synchronisé
+//    (connecté + dernière synchro sans erreur). « Autorisé et testé » (droits, affectation, cas négatif) reste à faire.
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import YAML from "yaml";
 import { type HermesProfile, readConfigStrict } from "./hermes.js";
 
 export const SOCKET_PATH_MAX = 100;
+export const SOCKET_SUN_PATH_LIMIT = 108;
+/** Pire cas Linux : pid_max = 4194304 (7 chiffres). */
+export const WORST_CASE_PID = "4194304";
 
 export interface SkillHealth {
   name: string;
@@ -17,16 +23,20 @@ export interface SkillHealth {
   hiddenByPlatforms: boolean; // en-tête invalide ET ligne `platforms:` : Hermes ignore la skill en silence
 }
 
-export interface ProfileHealth {
-  socketPathBytes: number; // le plus long entre join(home, "gateway.sock") et les *.sock réellement présents
+export interface SocketPathCheck {
+  socketPathBytes: number; // le plus long des chemins mesurés
   socketPathOk: boolean;
-  sockets: string[]; // fichiers *.sock présents dans home
+  longest: string; // le chemin qui donne la mesure
+  sockets: string[]; // fichiers *.sock présents (relatifs à home : « x.sock », « state/y.sock »)
+}
+
+export interface ProfileHealth extends SocketPathCheck {
   skills: SkillHealth[];
   configError: string | null;
   alerts: string[]; // une ligne courte par problème
 }
 
-export type AgentState = "installed" | "connected" | "authorized";
+export type AgentState = "installed" | "connected" | "synced";
 
 /** En-tête YAML (entre deux lignes `---` en tête de fichier) ; null si absent. */
 export function frontMatter(text: string): string | null {
@@ -69,35 +79,57 @@ async function skillsOf(home: string): Promise<SkillHealth[]> {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export async function checkProfile(home: string): Promise<ProfileHealth> {
-  const sockets: string[] = [];
+async function socketsIn(dir: string, prefix: string): Promise<string[]> {
+  const out: string[] = [];
   try {
-    for (const f of await readdir(home)) {
+    for (const f of await readdir(dir)) {
       if (!f.endsWith(".sock")) continue;
-      const st = await stat(join(home, f)).catch(() => null);
-      if (st) sockets.push(f);
+      const st = await stat(join(dir, f)).catch(() => null);
+      if (st) out.push(prefix + f);
     }
   } catch {
-    /* profil illisible : mesuré sur gateway.sock seulement */
+    /* dossier absent ou illisible : rien de présent */
   }
-  const candidates = ["gateway.sock", ...sockets].map((f) => join(home, f));
-  const socketPathBytes = Math.max(...candidates.map((p) => Buffer.byteLength(p, "utf8")));
+  return out;
+}
+
+/** Chemins de sockets attendus pour la version épinglée, même quand aucun socket n'existe encore. */
+export function expectedSocketPaths(home: string): string[] {
+  return [join(home, "gateway.sock"), join(home, "state", `gateway.loop-tick.${WORST_CASE_PID}.sock`)];
+}
+
+/** Mesure (en octets UTF-8) des chemins attendus + de tout *.sock présent dans home et home/state. Pure lecture. */
+export async function checkSocketPaths(home: string): Promise<SocketPathCheck> {
+  const sockets = [...(await socketsIn(home, "")), ...(await socketsIn(join(home, "state"), "state/"))];
+  const candidates = [...expectedSocketPaths(home), ...sockets.map((f) => join(home, f))];
+  let longest = candidates[0]!;
+  for (const c of candidates) if (Buffer.byteLength(c, "utf8") > Buffer.byteLength(longest, "utf8")) longest = c;
+  const socketPathBytes = Buffer.byteLength(longest, "utf8");
+  return { socketPathBytes, socketPathOk: socketPathBytes <= SOCKET_PATH_MAX, longest, sockets };
+}
+
+export function socketPathAlert(c: SocketPathCheck): string {
+  return `chemin de socket trop long : ${c.socketPathBytes} octets (max ${SOCKET_PATH_MAX}, limite système ${SOCKET_SUN_PATH_LIMIT}) pour ${c.longest} — racine trop profonde`;
+}
+
+export async function checkProfile(home: string): Promise<ProfileHealth> {
+  const sock = await checkSocketPaths(home);
   const skills = await skillsOf(home);
   const { error: configError } = await readConfigStrict(home);
   const alerts: string[] = [];
-  if (socketPathBytes > SOCKET_PATH_MAX) alerts.push(`chemin de socket trop long : ${socketPathBytes} octets (max ${SOCKET_PATH_MAX}, limite système 108) — racine trop profonde`);
+  if (!sock.socketPathOk) alerts.push(socketPathAlert(sock));
   for (const s of skills) {
     if (s.hiddenByPlatforms) alerts.push(`skill « ${s.name} » cachée : en-tête YAML invalide avec \`platforms:\``);
     else if (!s.yamlOk) alerts.push(`skill « ${s.name} » : en-tête YAML invalide ou absent`);
   }
   if (configError) alerts.push(configError);
-  return { socketPathBytes, socketPathOk: socketPathBytes <= SOCKET_PATH_MAX, sockets, skills, configError, alerts };
+  return { ...sock, skills, configError, alerts };
 }
 
-/** installé = profil présent ; connecté = authStatus logged_in ; autorisé = connecté + dernière synchro sans erreur. */
+/** installé = profil présent ; connecté = authStatus logged_in ; connecté et synchronisé = connecté + dernière synchro sans erreur. */
 export function agentState(rec: { error: string | null }, profile: Pick<HermesProfile, "authStatus">): AgentState {
   if (profile.authStatus !== "logged_in") return "installed";
-  return rec.error === null ? "authorized" : "connected";
+  return rec.error === null ? "synced" : "connected";
 }
 
-export const STATE_LABEL: Record<AgentState, string> = { installed: "installé", connected: "connecté", authorized: "autorisé" };
+export const STATE_LABEL: Record<AgentState, string> = { installed: "installé", connected: "connecté", synced: "connecté et synchronisé" };

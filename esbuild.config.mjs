@@ -19,6 +19,7 @@ const node = {
 const targets = [
   { ...node, entryPoints: ["src/worker.ts"], outfile: "dist/worker.js" },
   { ...node, entryPoints: ["src/manifest.ts"], outfile: "dist/manifest.js" },
+  { ...node, entryPoints: ["src/lib.ts"], outfile: "dist/lib.js" }, // pour scripts/migrate-assignments.mjs
   {
     platform: "browser",
     target: "es2022",

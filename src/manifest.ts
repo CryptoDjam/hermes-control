@@ -8,8 +8,9 @@ const manifest = {
   displayName: "Hermes Control",
   author: "Cyril M",
   description:
-    "Hermes Agent as the engine, Paperclip in charge: the agent name picks its Hermes profile, the assignment is recorded for the adapter, and the provider / model / thinking " +
-    "chosen in the agent menu are written to that Hermes profile; a Hermes agent created in Paperclip gets its Hermes profile (empty .env), folders and links prepared in its company's instance. Health: installed / connected / authorized per agent, socket path and skill YAML checks. Pair it with the Hermes Control adapter.",
+    "Hermes Agent as the engine, Paperclip in charge: every agent runs only in the Hermes profile EXPLICITLY assigned to it (assignments table: company → authorized instances, agent → instance/profile; never by name), " +
+    "and the provider / model / thinking chosen in the agent menu are written to that profile. Actions: assign / unassign an agent, declare a company's authorized instances, prepare a profile in a chosen instance (empty .env). " +
+    "Health: installed / connected / connected-and-synced per agent, watchdog socket path and skill YAML checks. Pair it with the Hermes Control adapter.",
   categories: ["ui", "automation"],
   capabilities: [
     "agents.read",

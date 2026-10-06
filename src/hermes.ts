@@ -126,44 +126,53 @@ function expand(value: string, vars: Record<string, string>): string | null {
   return missing ? null : out;
 }
 
+export type LauncherHome = { home: string; error: null } | { home: null; error: string };
+
+const launcherError = (error: string): LauncherHome => ({ home: null, error });
+
 /**
  * HERMES_HOME d'un lanceur (hermesCommand) par lecture STATIQUE du script, sans l'exécuter : ligne `HERMES_HOME=…`,
  * avec $HOME / ~ → homedir, $PROJETC → <dossier du lanceur>/../.. (nos lanceurs le calculent ainsi) et toute variable
- * affectée littéralement plus haut dans le fichier. Sinon null (fichier absent, trop gros, binaire, ou valeur non résolue).
+ * affectée littéralement plus haut dans le fichier. Toute incertitude est une ERREUR explicite, jamais une conformité :
+ * lanceur relatif, absent, trop gros ou binaire ; aucun HERMES_HOME ; valeur non résolue (variable inconnue, sous-shell,
+ * expansion conditionnelle) ; PLUSIEURS affectations de HERMES_HOME (le shell appliquerait la dernière : refus).
  */
-export async function homeFromLauncherFile(launcher: string): Promise<string | null> {
-  if (!isAbsolute(launcher)) return null; // un lanceur relatif dépend du cwd de Paperclip : refusé
+export async function homeFromLauncherFile(launcher: string): Promise<LauncherHome> {
+  if (!isAbsolute(launcher)) return launcherError(`lanceur relatif (${launcher}) : dépend du cwd de Paperclip`);
   let path = resolve(launcher);
   try {
     path = await realpath(path); // les lanceurs font `readlink -f "$0"`
     const st = await stat(path);
-    if (!st.isFile() || st.size > LAUNCHER_MAX_BYTES) return null;
-  } catch {
-    return null;
+    if (!st.isFile()) return launcherError(`lanceur ${path} : pas un fichier`);
+    if (st.size > LAUNCHER_MAX_BYTES) return launcherError(`lanceur ${path} : trop gros pour une lecture statique (${st.size} octets)`);
+  } catch (e) {
+    return launcherError(`lanceur ${launcher} illisible : ${(e as Error).message}`);
   }
   let text: string;
   try {
     text = await readFile(path, "utf8");
-  } catch {
-    return null;
+  } catch (e) {
+    return launcherError(`lanceur ${path} illisible : ${(e as Error).message}`);
   }
-  if (text.includes("\0")) return null; // binaire : rien à lire
+  if (text.includes("\0")) return launcherError(`lanceur ${path} : fichier binaire, HERMES_HOME non lisible`);
   const vars: Record<string, string> = { HOME: homedir(), PROJETC: resolve(dirname(path), "..", "..") };
-  for (const line of text.split("\n")) {
+  const homes: { line: number; value: string | null }[] = [];
+  text.split("\n").forEach((line, i) => {
     const m = ASSIGN_RE.exec(line);
-    if (!m) continue;
+    if (!m) return;
     const [, name, raw] = m as unknown as [string, string, string];
     const lit = literalValue(raw);
-    if (lit === "ignore") continue;
+    if (lit === "ignore") return;
     const value = lit === null ? null : lit.quoted === "single" ? lit.value : expand(lit.value, vars);
-    if (name === "HERMES_HOME") {
-      if (!value || !value.startsWith("/")) return null;
-      const home = resolve(value);
-      return (await realpath(home).catch(() => null)) ?? home; // chemin réel quand le dossier existe
-    }
-    if (value !== null) vars[name] = value;
-  }
-  return null;
+    if (name === "HERMES_HOME") homes.push({ line: i + 1, value: value && value.startsWith("/") ? value : null });
+    else if (value !== null) vars[name] = value;
+  });
+  if (!homes.length) return launcherError(`lanceur ${path} : aucune affectation HERMES_HOME lisible`);
+  if (homes.length > 1) return launcherError(`lanceur ${path} : plusieurs HERMES_HOME (lignes ${homes.map((h) => h.line).join(", ")}) ; le shell appliquerait la dernière — refus`);
+  const only = homes[0]!;
+  if (!only.value) return launcherError(`lanceur ${path} : HERMES_HOME non résolu (ligne ${only.line} : variable inconnue, sous-shell ou valeur non littérale)`);
+  const home = resolve(only.value);
+  return { home: (await realpath(home).catch(() => null)) ?? home, error: null }; // chemin réel quand le dossier existe
 }
 
 export function parseConfig(text: string): Record<string, unknown> {

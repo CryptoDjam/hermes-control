@@ -4,6 +4,12 @@
 // Jamais de suppression. Pas de shell : `hermes profile create` via execFile.
 // Le profil est préparé avec un `.env` VIDE (R02a : `--clone` copie les clés et le jeton Telegram de l'instance ; on les retire),
 // sous un verrou par agent (`<instance>/.hermes-control/prepare-<slug>.lock`) : deux déclencheurs à la fois → une seule préparation.
+// État DURABLE de préparation : `<instance>/.hermes-control/preparing-<slug>.json` ({ startedAt, pid, stage }) est écrit AVANT
+// `hermes profile create --clone` (l'opération qui copie les secrets) ; le clone est couvert par try/catch/finally ; après le clone
+// le `.env` est vidé (rm + wx 600) puis `env-cleaned` est posé, et seulement alors `prepared-by-hermes-control` et la suppression
+// de `preparing-*`. Un `finally` ne s'exécute pas si le processus est tué : tant que `preparing-*` existe (ou qu'un profil créé par
+// nous n'a pas `env-cleaned`), le profil est INUTILISABLE (l'adaptateur refuse, voir profileUsability) jusqu'à une reprise réussie
+// (`prepareAgent` relancé termine le nettoyage). Un profil sans ces marqueurs (fait à la main) n'est jamais vidé.
 import { lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import { assertSafeName, profileCreate, profileHome } from "./hermes.js";
@@ -71,8 +77,51 @@ statut: préparé automatiquement par Hermes Control le {{date}}
 export const EMPTY_ENV = "# Rendu par le gestionnaire de connexions ; aucune clé héritée de l'instance.\n";
 const PREPARE_LOCK_STALE_MS = 10 * 60 * 1000;
 // marqueurs dans <profil>/.hermes-control/ : créé par nous, .env vidé (R02a idempotent)
-const MARK_PREPARED = "prepared-by-hermes-control";
-const MARK_ENV_CLEANED = "env-cleaned";
+export const MARK_PREPARED = "prepared-by-hermes-control";
+export const MARK_ENV_CLEANED = "env-cleaned";
+
+const SAFE_PROFILE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+
+export interface PreparingState {
+  startedAt: string;
+  pid: number;
+  stage: "cloning" | "env-cleaning" | "clone-failed";
+  updatedAt?: string;
+}
+
+/** Fichier d'état durable d'une préparation : `<instance>/.hermes-control/preparing-<slug>.json`. */
+export function preparingFile(instanceHome: string, profile: string): string {
+  return join(instanceHome, ".hermes-control", `preparing-${assertSafeName(profile)}.json`);
+}
+
+async function writePreparing(file: string, state: PreparingState): Promise<void> {
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2) + "\n", { mode: 0o600 });
+}
+
+/**
+ * Le profil est-il utilisable ? null si oui, sinon la raison : un état `preparing-*` présent (clone ou nettoyage interrompu,
+ * ou clone en échec), ou un profil créé par Hermes Control (`prepared-by-hermes-control`) sans `env-cleaned`.
+ * La présence de config.yaml ne suffit jamais à déclarer le profil prêt. Lecture seule.
+ */
+export async function profileUsability(instanceHome: string, profile: string): Promise<string | null> {
+  if (!SAFE_PROFILE.test(profile)) return `nom de profil invalide : ${profile}`;
+  const preparing = preparingFile(instanceHome, profile);
+  if (await exists(preparing)) {
+    let stage = "?";
+    try {
+      stage = String((JSON.parse(await readFile(preparing, "utf8")) as PreparingState).stage ?? "?");
+    } catch {
+      /* état illisible : il suffit qu'il existe */
+    }
+    return `préparation du profil « ${profile} » interrompue ou en échec (${preparing}, étape ${stage}) : profil inutilisable tant que « Préparer l'agent » n'a pas terminé le nettoyage`;
+  }
+  const home = profileHome(instanceHome, profile);
+  if ((await hasMark(home, MARK_PREPARED)) && !(await hasMark(home, MARK_ENV_CLEANED))) {
+    return `profil « ${profile} » créé par Hermes Control sans .env nettoyé (${join(home, ".hermes-control", MARK_ENV_CLEANED)} absent) : inutilisable tant que « Préparer l'agent » n'a pas terminé le nettoyage`;
+  }
+  return null;
+}
 
 /** Remplace <home>/.env par le fichier vide (en-tête seul), mode 600 ; le fichier est retiré puis recréé (`wx`) : jamais à travers un lien. */
 export async function writeEmptyEnv(home: string): Promise<void> {
@@ -90,11 +139,29 @@ async function setMark(home: string, mark: string): Promise<void> {
   await writeFile(join(home, ".hermes-control", mark), `${new Date().toISOString()}\n`);
 }
 
-/** Vide le .env et pose le marqueur. */
-async function cleanEnv(home: string, created: string[]): Promise<void> {
+/**
+ * Fin de préparation d'un profil créé par nous : .env vidé (rm + wx 600) → `env-cleaned` → `prepared-by-hermes-control` →
+ * suppression de `preparing-*` (seulement si `complete` : après un clone en échec, l'état reste, étape « clone-failed »,
+ * et le profil demeure inutilisable jusqu'à une reprise).
+ */
+async function finishProfile(home: string, preparing: string, created: string[], complete: boolean): Promise<void> {
+  await writePreparing(preparing, { startedAt: await startedAtOf(preparing), pid: process.pid, stage: "env-cleaning" });
   await writeEmptyEnv(home);
   await setMark(home, MARK_ENV_CLEANED);
+  await setMark(home, MARK_PREPARED);
   created.push(`${join(home, ".env")} (vide)`);
+  if (complete) await rm(preparing, { force: true });
+  else await writePreparing(preparing, { startedAt: await startedAtOf(preparing), pid: process.pid, stage: "clone-failed" });
+}
+
+async function startedAtOf(preparing: string): Promise<string> {
+  try {
+    const st = JSON.parse(await readFile(preparing, "utf8")) as PreparingState;
+    if (typeof st.startedAt === "string") return st.startedAt;
+  } catch {
+    /* absent ou illisible */
+  }
+  return new Date().toISOString();
 }
 
 /**
@@ -192,22 +259,39 @@ async function prepareLocked(input: PrepareInput, s: string): Promise<PrepareRes
   const home = profileHome(input.instanceHome, s);
 
   // 1. le profil Hermes (clone de l'instance : config.yaml, .env, SOUL.md, skills)
+  const preparing = preparingFile(input.instanceHome, s);
+  const interrupted = await exists(preparing); // passage précédent interrompu ou en échec : état durable encore là
   if (!(await exists(join(home, "config.yaml")))) {
     const description = input.title ? `${input.agentName} — ${input.title}` : input.agentName;
-    await profileCreate(input.instanceHome, s, description, binary, { clone: true });
-    created.push(`profil Hermes ${basename(input.instanceHome)}/${s}`);
+    // état durable AVANT l'opération qui peut copier les secrets : si le processus meurt ici, le profil reste inutilisable
+    await writePreparing(preparing, { startedAt: new Date().toISOString(), pid: process.pid, stage: "cloning" });
+    let cloneError: unknown = null;
     try {
-      if (!(await exists(join(home, "config.yaml")))) throw new Error(`le profil ${home} n'a pas été créé par hermes`);
+      await profileCreate(input.instanceHome, s, description, binary, { clone: true });
+    } catch (e) {
+      cloneError = e;
     } finally {
-      // R02a : quoi qu'il arrive ensuite, le .env copié par le clone (clés, jeton Telegram) est vidé tout de suite
       if (await exists(home)) {
-        await setMark(home, MARK_PREPARED);
-        await cleanEnv(home, created);
+        // R02a : quoi qu'il arrive ensuite, le .env copié par le clone (clés, jeton Telegram) est vidé tout de suite
+        try {
+          await finishProfile(home, preparing, created, cloneError === null);
+        } catch (e) {
+          if (cloneError === null) cloneError = e; // preparing-* reste : profil inutilisable jusqu'à une reprise
+        }
+      } else if (cloneError === null) {
+        await rm(preparing, { force: true });
       }
     }
-  } else if ((await hasMark(home, MARK_PREPARED)) && !(await hasMark(home, MARK_ENV_CLEANED))) {
-    // profil créé par nous à un passage interrompu avant le vidage : on termine (jamais pour un profil fait à la main)
-    await cleanEnv(home, created);
+    if (cloneError !== null) {
+      const msg = cloneError instanceof Error ? cloneError.message : String(cloneError);
+      const kept = await exists(preparing);
+      throw new Error(`clone du profil « ${s} » en échec : ${msg.split("\n")[0]} — ${kept ? `état ${preparing} conservé : profil inutilisable jusqu'à une reprise réussie (relancer « Préparer l'agent »)` : "rien n'a été créé"}`);
+    }
+    if (!(await exists(join(home, "config.yaml")))) throw new Error(`le profil ${home} n'a pas été créé par hermes`);
+    created.push(`profil Hermes ${basename(input.instanceHome)}/${s}`);
+  } else if (interrupted || ((await hasMark(home, MARK_PREPARED)) && !(await hasMark(home, MARK_ENV_CLEANED)))) {
+    // reprise : profil créé par nous à un passage interrompu avant la fin du nettoyage → on termine (jamais pour un profil fait à la main)
+    await finishProfile(home, preparing, created, true);
   }
   if (!(await exists(join(home, "config.yaml")))) throw new Error(`le profil ${home} n'a pas été créé par hermes`);
 

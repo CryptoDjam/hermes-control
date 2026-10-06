@@ -40,67 +40,79 @@ describe("assertSafeName", () => {
   });
 });
 
-describe("homeFromLauncherFile (lecture statique, sans exécution)", () => {
+describe("homeFromLauncherFile (lecture statique, sans exécution) : { home } ou { error }, jamais une conformité par défaut", () => {
+  /** Forme réelle de ~/Projects/ProjetC/hermes/bin/hermes-cmo (relue le 06/10/2026). */
+  const REAL_FORM = (home: string) => `#!/bin/bash
+# Lanceur de l'agent « cmo » : profil Hermes cmo de l'instance « marketing ». Utilisé par Paperclip (champ hermesCommand).
+# Le projet est déduit de l'emplacement du script (PROJETC peut être forcé par l'environnement).
+PROJETC="\${PROJETC:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
+export PROJETC
+export HERMES_HOME="${home}"
+export HERMES_WRITE_SAFE_ROOT="$PROJETC/agents/cmo:$PROJETC/agents/apolline-m/contenus/brouillons:$PROJETC/agents/creation_contenus:$HOME/Work/site/atelier/test"
+# 06/10/2026 : Hermes 0.21.5 (tag v2026.9.24, installé à part) ; repli sur la 0.19 de ~/.local/bin si absent. Forçable : HERMES_BIN=/chemin/vers/hermes
+HERMES_BIN="\${HERMES_BIN:-$HOME/.local/share/hermes-0.21/bin/hermes}"
+[ -x "$HERMES_BIN" ] || HERMES_BIN="$HOME/.local/bin/hermes"
+exec "$HERMES_BIN" "$@"
+`;
 
-  it("lanceur de la forme ProjetC/hermes/bin/hermes-cmo (non exécutable) → PROJETC/hermes/profils/marketing", async () => {
+  it("lanceur conforme de la forme ProjetC/hermes/bin/hermes-cmo (non exécutable) → PROJETC/hermes/profils/marketing", async () => {
     const root = await mkdtemp(join(tmpdir(), "hc-launcher-"));
     const bin = join(root, "ProjetC", "hermes", "bin");
     await mkdir(bin, { recursive: true });
     const launcher = join(bin, "hermes-cmo");
-    await writeFile(launcher, `#!/bin/bash
-# Lanceur de l'agent « cmo » : profil Hermes cmo de l'instance « marketing ».
-PROJETC="\${PROJETC:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
-export PROJETC
-export HERMES_HOME="$PROJETC/hermes/profils/marketing"
-export HERMES_WRITE_SAFE_ROOT="$PROJETC/agents/cmo:$HOME/Work/site"
-HERMES_BIN="\${HERMES_BIN:-$HOME/.local/share/hermes-0.21/bin/hermes}"
-[ -x "$HERMES_BIN" ] || HERMES_BIN="$HOME/.local/bin/hermes"
-exec "$HERMES_BIN" "$@"
-`, { mode: 0o644 });
+    await writeFile(launcher, REAL_FORM("$PROJETC/hermes/profils/marketing"), { mode: 0o644 });
     expect((await stat(launcher)).mode & 0o111).toBe(0); // pas exécutable : la lecture est forcément statique
-    expect(await homeFromLauncherFile(launcher)).toBe(join(root, "ProjetC", "hermes", "profils", "marketing"));
+    expect(await homeFromLauncherFile(launcher)).toEqual({ home: join(root, "ProjetC", "hermes", "profils", "marketing"), error: null });
   });
 
   it("résout $HOME, ${HOME}, ~ et une variable affectée littéralement plus haut", async () => {
     const root = await mkdtemp(join(tmpdir(), "hc-launcher-"));
     const a = join(root, "a");
     await writeFile(a, 'BASE="$HOME/.hermes-x"\nexport HERMES_HOME=${BASE}/direction\n');
-    expect(await homeFromLauncherFile(a)).toBe(join(homedir(), ".hermes-x", "direction"));
+    expect((await homeFromLauncherFile(a)).home).toBe(join(homedir(), ".hermes-x", "direction"));
     const b = join(root, "b");
     await writeFile(b, "HERMES_HOME=~/.hermes\n");
-    expect(await homeFromLauncherFile(b)).toBe(join(homedir(), ".hermes"));
+    expect((await homeFromLauncherFile(b)).home).toBe(join(homedir(), ".hermes"));
     const c = join(root, "c");
     await writeFile(c, 'ROOT=/srv/hermes\nexport HERMES_HOME="${ROOT}/prod"  # commentaire\n');
-    expect(await homeFromLauncherFile(c)).toBe("/srv/hermes/prod");
+    expect((await homeFromLauncherFile(c)).home).toBe("/srv/hermes/prod");
   });
 
-  it("apostrophes = littéral (sauf si elles contiennent $) ; `VAR=x commande` ignoré ; lanceur relatif refusé ; résultat par realpath", async () => {
+  it("apostrophes = littéral (sauf si elles contiennent $ → erreur) ; `VAR=x commande` ignoré ; lanceur relatif refusé ; résultat par realpath", async () => {
     const root = await mkdtemp(join(tmpdir(), "hc-launcher-"));
     await writeFile(join(root, "sq"), "export HERMES_HOME='/srv/h$HOME'\n");
-    expect(await homeFromLauncherFile(join(root, "sq"))).toBeNull();
+    expect((await homeFromLauncherFile(join(root, "sq"))).error).toMatch(/non résolu/);
     await writeFile(join(root, "sq2"), "ROOT='/srv/h'\nexport HERMES_HOME=\"$ROOT/prod\"\n");
-    expect(await homeFromLauncherFile(join(root, "sq2"))).toBe("/srv/h/prod");
+    expect((await homeFromLauncherFile(join(root, "sq2"))).home).toBe("/srv/h/prod");
     await writeFile(join(root, "cmd"), "HERMES_HOME=/ailleurs exec hermes \"$@\"\nexport HERMES_HOME=/srv/vrai\n");
-    expect(await homeFromLauncherFile(join(root, "cmd"))).toBe("/srv/vrai");
-    expect(await homeFromLauncherFile("bin/hermes-x")).toBeNull();
+    expect((await homeFromLauncherFile(join(root, "cmd"))).home).toBe("/srv/vrai");
+    expect((await homeFromLauncherFile("bin/hermes-x")).error).toMatch(/relatif/);
     // le dossier visé est un lien : on renvoie le chemin réel
     await mkdir(join(root, "reel"));
     await symlink(join(root, "reel"), join(root, "lien"));
     await writeFile(join(root, "ln"), `HERMES_HOME=${join(root, "lien")}\n`);
-    expect(await homeFromLauncherFile(join(root, "ln"))).toBe(join(root, "reel"));
+    expect((await homeFromLauncherFile(join(root, "ln"))).home).toBe(join(root, "reel"));
   });
 
-  it("null si pas de HERMES_HOME, variable inconnue, sous-shell, fichier absent ou trop gros", async () => {
+  it("INCERTITUDE = ERREUR : variable non résolue (sonde Codex n°2), deux HERMES_HOME (sonde n°3), pas de HERMES_HOME, sous-shell, absent, trop gros", async () => {
     const root = await mkdtemp(join(tmpdir(), "hc-launcher-"));
+    await writeFile(join(root, "unknown"), '#!/bin/sh\nexport HERMES_HOME="$UNKNOWN_REVIEW_ROOT/ailleurs"\nexec hermes "$@"\n');
+    const unknown = await homeFromLauncherFile(join(root, "unknown"));
+    expect(unknown.home).toBeNull();
+    expect(unknown.error).toMatch(/non résolu.*ligne 2/);
+    await writeFile(join(root, "twice"), `#!/bin/sh\nexport HERMES_HOME="${join(root, "a")}"\nexport HERMES_HOME="${join(root, "b")}"\nexec hermes "$@"\n`);
+    const twice = await homeFromLauncherFile(join(root, "twice"));
+    expect(twice.home).toBeNull();
+    expect(twice.error).toMatch(/plusieurs HERMES_HOME \(lignes 2, 3\)/);
     await writeFile(join(root, "none"), "#!/bin/bash\nexec hermes \"$@\"\n");
-    expect(await homeFromLauncherFile(join(root, "none"))).toBeNull();
-    await writeFile(join(root, "unknown"), "HERMES_HOME=$MYSTERE/x\n");
-    expect(await homeFromLauncherFile(join(root, "unknown"))).toBeNull();
+    expect((await homeFromLauncherFile(join(root, "none"))).error).toMatch(/aucune affectation HERMES_HOME/);
     await writeFile(join(root, "subshell"), 'HERMES_HOME="$(hermes config path)"\n');
-    expect(await homeFromLauncherFile(join(root, "subshell"))).toBeNull();
-    expect(await homeFromLauncherFile(join(root, "absent"))).toBeNull();
+    expect((await homeFromLauncherFile(join(root, "subshell"))).error).toMatch(/non résolu/);
+    await writeFile(join(root, "cond"), 'HERMES_HOME="${HERMES_HOME:-/x}"\n');
+    expect((await homeFromLauncherFile(join(root, "cond"))).error).toMatch(/non résolu/);
+    expect((await homeFromLauncherFile(join(root, "absent"))).error).toMatch(/illisible/);
     await writeFile(join(root, "big"), "#".repeat(70 * 1024) + "\nHERMES_HOME=/x\n");
-    expect(await homeFromLauncherFile(join(root, "big"))).toBeNull();
+    expect((await homeFromLauncherFile(join(root, "big"))).error).toMatch(/trop gros/);
   });
 });
 

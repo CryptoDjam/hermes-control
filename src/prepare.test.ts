@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_ENV, prepareAgent, withPrepareLock, writeEmptyEnv } from "./prepare.js";
+import { EMPTY_ENV, MARK_ENV_CLEANED, MARK_PREPARED, preparingFile, prepareAgent, profileUsability, withPrepareLock, writeEmptyEnv } from "./prepare.js";
 import { layout } from "./workspace.js";
 
 let root: string;
@@ -176,6 +176,93 @@ describe("prepareAgent", () => {
     const old = new Date(Date.now() - 11 * 60 * 1000);
     await utimes(lock, old, old);
     expect(await withPrepareLock(inst, "chef", async () => "x")).toBe("x");
+  });
+
+  it("état durable : preparing-<slug>.json écrit AVANT le clone, puis .env vidé → env-cleaned → prepared → preparing supprimé", async () => {
+    const ws = layout(join(root, "ws"));
+    const inst = join(ws.profils, "acme");
+    // un faux hermes qui prouve que l'état durable existe déjà au moment du clone (il le copie dans le profil)
+    const spy = join(root, "hermes-spy");
+    await writeFile(spy, `#!/bin/bash
+set -e
+p="$HERMES_HOME/profiles/$3"; mkdir -p "$p"
+cp "$HERMES_HOME/config.yaml" "$p/config.yaml"; cp "$HERMES_HOME/.env" "$p/.env"
+cp "$HERMES_HOME/.hermes-control/preparing-$3.json" "$p/preparing-seen.json"
+exit 0
+`);
+    await chmod(spy, 0o755);
+    const r = await prepareAgent({ ws, instanceHome: inst, agentName: "Durable", binary: spy });
+    const seen = JSON.parse(await readFile(join(r.profileHome, "preparing-seen.json"), "utf8")) as { stage: string; pid: number; startedAt: string };
+    expect(seen.stage).toBe("cloning");
+    expect(seen.pid).toBe(process.pid);
+    expect(seen.startedAt).toMatch(/^\d{4}-/);
+    await expect(stat(preparingFile(inst, "durable"))).rejects.toThrow(); // terminé : état supprimé
+    expect(await readFile(join(r.profileHome, ".env"), "utf8")).toBe(EMPTY_ENV);
+    expect(await stat(join(r.profileHome, ".hermes-control", MARK_ENV_CLEANED))).toBeTruthy();
+    expect(await stat(join(r.profileHome, ".hermes-control", MARK_PREPARED))).toBeTruthy();
+    expect(await profileUsability(inst, "durable")).toBeNull();
+  });
+
+  it("NON-RÉGRESSION (sonde Codex n°4) : clone PARTIEL en échec (config.yaml + .env écrits, sortie 1) → .env vidé ET profil inutilisable ; la reprise nettoie ; profil manuel intact", async () => {
+    const ws = layout(join(root, "ws"));
+    const inst = join(ws.profils, "acme");
+    const fake = join(root, "fake-partial-clone");
+    await writeFile(fake, '#!/bin/sh\np="$HERMES_HOME/profiles/$3"\nmkdir -p "$p"\nprintf "model: {}\\n" > "$p/config.yaml"\nprintf "REVIEW_FAKE_TOKEN=not-a-secret\\n" > "$p/.env"\nexit 1\n', { mode: 0o700 });
+    // profil fait à la main, à côté : jamais touché
+    await mkdir(join(inst, "profiles", "manuel"), { recursive: true });
+    await writeFile(join(inst, "profiles", "manuel", "config.yaml"), "model: {}\n");
+    await writeFile(join(inst, "profiles", "manuel", ".env"), "MA_CLE=gardee\n");
+    await expect(prepareAgent({ ws, instanceHome: inst, agentName: "Test", title: null, entreprise: "Test", binary: fake })).rejects.toThrow(/clone du profil « test » en échec.*état .*preparing-test\.json conservé : profil inutilisable/);
+    const home = join(inst, "profiles", "test");
+    expect(await readFile(join(home, ".env"), "utf8")).toBe(EMPTY_ENV); // le marqueur factice n'y est plus
+    expect(await readFile(join(home, ".env"), "utf8")).not.toContain("REVIEW_FAKE_TOKEN");
+    expect(JSON.parse(await readFile(preparingFile(inst, "test"), "utf8")).stage).toBe("clone-failed");
+    expect(await profileUsability(inst, "test")).toMatch(/interrompue ou en échec.*clone-failed.*inutilisable/);
+    // reprise avec un clone qui marche cette fois : config.yaml déjà là → nettoyage terminé, état supprimé, profil utilisable
+    const again = await prepareAgent({ ws, instanceHome: inst, agentName: "Test", binary: fakeHermes });
+    expect(again.created.some((c) => c.endsWith(".env (vide)"))).toBe(true);
+    await expect(stat(preparingFile(inst, "test"))).rejects.toThrow();
+    expect(await profileUsability(inst, "test")).toBeNull();
+    expect(await readFile(join(home, ".env"), "utf8")).toBe(EMPTY_ENV);
+    // le profil manuel n'a pas bougé ; l'instance garde ses clés
+    expect(await readFile(join(inst, "profiles", "manuel", ".env"), "utf8")).toBe("MA_CLE=gardee\n");
+    expect(await profileUsability(inst, "manuel")).toBeNull();
+    expect(await readFile(join(inst, ".env"), "utf8")).toContain("marqueur");
+  });
+
+  it("INTERRUPTION brutale simulée (processus tué après le clone : preparing-* laissé, .env plein, aucun marqueur) → profil inutilisable ; la reprise répare", async () => {
+    const ws = layout(join(root, "ws"));
+    const inst = join(ws.profils, "acme");
+    const home = join(inst, "profiles", "tue");
+    await mkdir(home, { recursive: true });
+    await writeFile(join(home, "config.yaml"), "model: {}\n");
+    await writeFile(join(home, ".env"), "OPENAI_API_KEY=marqueur\n"); // copié par le clone, jamais vidé : le processus est mort
+    await mkdir(join(inst, ".hermes-control"), { recursive: true });
+    await writeFile(preparingFile(inst, "tue"), JSON.stringify({ startedAt: "2026-10-06T10:00:00.000Z", pid: 4194303, stage: "cloning" }));
+    expect(await profileUsability(inst, "tue")).toMatch(/interrompue.*étape cloning.*inutilisable/);
+    // config.yaml présent ne suffit pas : la reprise (prepareAgent) termine le nettoyage
+    const r = await prepareAgent({ ws, instanceHome: inst, agentName: "Tue", binary: "/bin/false" }); // aucun clone nécessaire : le binaire n'est pas appelé
+    expect(r.created.some((c) => c.endsWith(".env (vide)"))).toBe(true);
+    expect(await readFile(join(home, ".env"), "utf8")).toBe(EMPTY_ENV);
+    await expect(stat(preparingFile(inst, "tue"))).rejects.toThrow();
+    expect(await profileUsability(inst, "tue")).toBeNull();
+    // clone jamais commencé (preparing seul, pas de dossier) : la reprise refait le clone
+    await writeFile(preparingFile(inst, "jamais"), JSON.stringify({ startedAt: "x", pid: 4194303, stage: "cloning" }));
+    expect(await profileUsability(inst, "jamais")).toMatch(/inutilisable/);
+    const j = await prepareAgent({ ws, instanceHome: inst, agentName: "Jamais", binary: fakeHermes });
+    expect(j.created.some((c) => c.startsWith("profil Hermes"))).toBe(true);
+    expect(await profileUsability(inst, "jamais")).toBeNull();
+  });
+
+  it("profileUsability : profil créé par nous sans env-cleaned → inutilisable ; profil manuel ou terminé → utilisable ; nom invalide refusé", async () => {
+    const ws = layout(join(root, "ws"));
+    const inst = join(ws.profils, "acme");
+    const r = await prepareAgent({ ws, instanceHome: inst, agentName: "Apolline M", binary: fakeHermes });
+    expect(await profileUsability(inst, "apolline-m")).toBeNull();
+    await rm(join(r.profileHome, ".hermes-control", MARK_ENV_CLEANED));
+    expect(await profileUsability(inst, "apolline-m")).toMatch(/sans \.env nettoyé/);
+    expect(await profileUsability(inst, "default")).toBeNull();
+    expect(await profileUsability(inst, "../x")).toMatch(/invalide/);
   });
 
   it("refuse un nom inutilisable", async () => {

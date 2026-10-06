@@ -1,8 +1,11 @@
 // Adaptateur « Hermes Control » : remplace l'adaptateur Hermes intégré de Paperclip (même type `hermes_local`),
 // identique en tout sauf :
 //  - les menus Provider / Model de l'agent proposent les providers et modèles connus de Hermes ;
-//  - l'agent tourne dans le profil Hermes qui lui est AFFECTÉ (carte ~/.config/hermes-control/agents.json, écrite par le
-//    plugin à la synchro / préparation) ; sans affectation, il refuse de tourner (R02b : contrôle avant réveil) ;
+//  - l'agent tourne dans le profil Hermes qui lui est AFFECTÉ EXPLICITEMENT (table ~/.config/hermes-control/assignments.json,
+//    écrite par les actions d'administration du plugin ; agents.json n'est qu'une projection de secours à même empreinte) ;
+//    sans affectation, affectation invalide (instance plus autorisée pour l'entreprise de l'agent, profil revendiqué deux
+//    fois, instance hors racines), config.yaml absent/invalide, profil en préparation interrompue, chemin de socket trop
+//    long ou lanceur-script incertain / divergent → il REFUSE de tourner (R02b : contrôle avant réveil, même « connecté ») ;
 //  - les skills assignés à l'agent dans Paperclip sont liés dans `<profil>/skills` (là où Hermes les lit),
 //    à la synchro Paperclip et à chaque passage ; décochés → liens retirés.
 // Auteur : Cyril M — MIT.
@@ -13,8 +16,11 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { discoverLight } from "../../src/discovery.js";
 import { type HermesInstance, homeFromLauncherFile, readConfigStrict, readModelCatalogs } from "../../src/hermes.js";
-import { agentsMapError, agentsMapFile, recallAgent } from "../../src/agents-map.js";
+import { agentsMapError } from "../../src/agents-map.js";
+import { type ResolvedAssignment, assignmentsFile, isApprovedBinary, resolveAssignment } from "../../src/assignments.js";
+import { checkSocketPaths, socketPathAlert } from "../../src/health.js";
 import { slug } from "../../src/match.js";
+import { profileUsability } from "../../src/prepare.js";
 import { exists, readWorkspace } from "../../src/workspace.js";
 import { reconcileIntoProfile, snapshotForProfile } from "./skills.js";
 
@@ -77,33 +83,40 @@ async function hermesModels(list: HermesInstance[]): Promise<{ id: string; label
   return out;
 }
 
-const NOT_ASSIGNED = "agent non affecté à une instance Hermes : synchronise ou prépare l'agent dans Paperclip (page Hermes)";
-
 async function realOrResolved(p: string): Promise<string> {
   return (await realpath(p).catch(() => null)) ?? resolve(p);
 }
 
 /**
- * Affectation d'un agent, contrôlée AVANT tout passage : entrée dans agents.json, profil toujours présent (config.yaml)
- * et lisible, et cohérente avec le lanceur de l'agent (un lanceur fait `export HERMES_HOME=…`, qui écraserait le nôtre).
+ * Affectation d'un agent, contrôlée AVANT tout passage : entrée valide dans la table (entreprise de l'agent, instance autorisée,
+ * profil non revendiqué, instance dans une racine connue), profil présent (config.yaml) et lisible, profil utilisable (aucune
+ * préparation interrompue), chemins de sockets de la version épinglée sous la limite, et lanceur cohérent : un binaire Hermes
+ * approuvé est accepté tel quel ; un SCRIPT doit se lire sans incertitude et viser exactement le profil affecté.
  */
-async function assignmentOf(agentId: string | undefined, name: string, launcher: string | null): Promise<{ instance: string; profile: string; home: string }> {
-  const rec = agentId ? await recallAgent(agentId) : null;
-  if (!rec) {
+async function assignmentOf(agent: { id?: string; name: string; companyId?: string | null }, command: string | null): Promise<ResolvedAssignment> {
+  const r = await resolveAssignment(agent.id ?? "", { companyId: agent.companyId ?? null });
+  const name = agent.name;
+  if (!r.ok) {
     const mapErr = await agentsMapError();
-    throw new Error(`[hermes-control] « ${name} » : ${NOT_ASSIGNED}${mapErr ? ` — ${mapErr}` : ""} (carte : ${agentsMapFile()}).`);
+    throw new Error(`[hermes-control] « ${name} » : ${r.reason}${mapErr ? ` — ${mapErr}` : ""} ; aucun passage.`);
   }
+  const rec = r.ok;
+  const label = `${rec.instanceHome.split("/").pop()}/${rec.profile}`;
   if (!(await exists(join(rec.home, "config.yaml")))) {
-    throw new Error(`[hermes-control] « ${name} » : affecté à ${rec.instance}/${rec.profile} mais ${rec.home}/config.yaml n'existe plus ; ${NOT_ASSIGNED}.`);
+    throw new Error(`[hermes-control] « ${name} » : affecté à ${label} mais ${rec.home}/config.yaml n'existe pas (profil à préparer : page Hermes → « Préparer l'agent ») ; aucun passage.`);
   }
   const { error } = await readConfigStrict(rec.home);
   if (error) throw new Error(`[hermes-control] « ${name} » : ${rec.home}/${error} ; aucun passage tant que le fichier n'est pas réparé.`);
-  if (launcher) {
-    const fromLauncher = await homeFromLauncherFile(launcher);
-    if (fromLauncher) {
-      const [a, b] = await Promise.all([realOrResolved(rec.home), realOrResolved(fromLauncher)]);
-      if (a !== b) throw new Error(`[hermes-control] « ${name} » : affectation (agents.json) ≠ lanceur : ${a} vs ${b} (${launcher}) ; corrige l'un ou l'autre.`);
-    }
+  const unusable = await profileUsability(rec.instanceHome, rec.profile);
+  if (unusable) throw new Error(`[hermes-control] « ${name} » : ${unusable} ; aucun passage.`);
+  const sock = await checkSocketPaths(rec.home);
+  if (!sock.socketPathOk) throw new Error(`[hermes-control] « ${name} » : ${socketPathAlert(sock)} ; aucun passage (le watchdog de Hermes ne pourrait pas ouvrir son socket).`);
+  if (command && !isApprovedBinary(command, { approvedBinaries: r.approvedBinaries })) {
+    // un script lanceur : toute incertitude est un refus, jamais une conformité
+    const fromLauncher = await homeFromLauncherFile(command);
+    if (fromLauncher.home === null) throw new Error(`[hermes-control] « ${name} » : lanceur incertain, refus : ${fromLauncher.error}. Déclare un binaire Hermes approuvé (HERMES_CONTROL_HERMES_BIN ou approvedBinaries dans ${assignmentsFile()}) ou corrige le lanceur.`);
+    const [a, b] = await Promise.all([realOrResolved(rec.home), realOrResolved(fromLauncher.home)]);
+    if (a !== b) throw new Error(`[hermes-control] « ${name} » : affectation (table) ≠ lanceur : ${a} vs ${b} (${command}) ; corrige l'un ou l'autre.`);
   }
   return rec;
 }
@@ -111,12 +124,12 @@ async function assignmentOf(agentId: string | undefined, name: string, launcher:
 /** `base` injectable (tests) : par défaut l'adaptateur Hermes officiel. */
 export function createServerAdapter(base: Base = createHermesLocalServerAdapter()): Base {
   const execute: Base["execute"] = async (ctx) => {
-    const c = ctx as unknown as { config?: AnyRecord; onLog?: (stream: "stdout" | "stderr", text: string) => Promise<void> | void; agent: { id?: string; name: string; adapterConfig?: unknown } };
+    const c = ctx as unknown as { config?: AnyRecord; onLog?: (stream: "stdout" | "stderr", text: string) => Promise<void> | void; agent: { id?: string; name: string; companyId?: string | null; adapterConfig?: unknown } };
     const config: AnyRecord = { ...((c.config ?? (c.agent.adapterConfig as AnyRecord | undefined)) ?? {}) };
-    const launcher = typeof config["hermesCommand"] === "string" && config["hermesCommand"].includes("/") ? (config["hermesCommand"] as string) : null;
-    let m: { instance: string; profile: string; home: string };
+    const command = typeof config["hermesCommand"] === "string" && (config["hermesCommand"] as string).trim() ? (config["hermesCommand"] as string).trim() : null;
+    let m: ResolvedAssignment;
     try {
-      m = await assignmentOf(c.agent.id, c.agent.name, launcher);
+      m = await assignmentOf(c.agent, command);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       await c.onLog?.("stderr", msg + "\n");
@@ -134,7 +147,7 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
       }
     }
     if (typeof config["hermesCommand"] !== "string" || !(config["hermesCommand"] as string).trim()) config["hermesCommand"] = await hermesBinary();
-    await c.onLog?.("stdout", `[hermes-control] ${c.agent.name} → Hermes ${m.instance}/${m.profile} (affectation agents.json) · HERMES_HOME=${m.home}\n`);
+    await c.onLog?.("stdout", `[hermes-control] ${c.agent.name} → Hermes ${m.instanceHome.split("/").pop()}/${m.profile} (affectation explicite, ${m.source === "table" ? "table" : "projection à même empreinte"}, par ${m.assignedBy} le ${m.assignedAt}) · HERMES_HOME=${m.home}\n`);
     if (Object.prototype.hasOwnProperty.call(config, "paperclipRuntimeSkills")) {
       try {
         const r = await reconcileIntoProfile(config, m.home);
@@ -169,29 +182,29 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
       level: list.length ? "info" : "error",
       message: list.length ? `Hermes Control : ${list.length} instance(s) trouvée(s)` : "Hermes Control : aucune instance Hermes trouvée",
       detail: list.length ? summary : null,
-      hint: list.length ? `Un agent tourne seulement dans le profil qui lui est affecté (${agentsMapFile()}, écrit par le plugin Hermes Control à la synchro ou à la préparation).` : "Ajoute le dossier des instances dans ~/.config/hermes-control/roots (une ligne par dossier).",
+      hint: list.length ? `Un agent tourne seulement dans le profil qui lui est affecté explicitement (${assignmentsFile()}, écrit par les actions d'affectation du plugin Hermes Control).` : "Ajoute le dossier des instances dans ~/.config/hermes-control/roots (une ligne par dossier).",
     });
     if (!list.length) result.status = "fail";
     return result;
   };
 
-  /** Profil Hermes d'un agent connu seulement par son id (listSkills / syncSkills) : carte des affectations écrite par le plugin. */
-  async function profileOf(agentId: string): Promise<{ home: string; label: string } | null> {
-    const r = await recallAgent(agentId);
-    return r ? { home: r.home, label: `${r.instance}/${r.profile}` } : null;
+  /** Profil Hermes d'un agent connu seulement par son id (listSkills / syncSkills) : table des affectations explicites. */
+  async function profileOf(agentId: string, companyId: string | null | undefined): Promise<{ home: string; label: string } | null> {
+    const r = await resolveAssignment(agentId, { companyId: companyId ?? null });
+    return r.ok ? { home: r.ok.home, label: `${r.ok.instanceHome.split("/").pop()}/${r.ok.profile}` } : null;
   }
-  const UNKNOWN_PROFILE = "Hermes Control : profil Hermes inconnu tant que le plugin n'a pas affecté l'agent (synchronise ou prépare l'agent dans la page Hermes) ; les liens de skills seront posés dans son profil au prochain passage.";
+  const UNKNOWN_PROFILE = "Hermes Control : profil Hermes inconnu tant que l'agent n'est pas affecté explicitement (page Hermes → « Affecter » ou « Préparer l'agent ») ; les liens de skills seront posés dans son profil au prochain passage.";
 
   const listSkills: NonNullable<Base["listSkills"]> = async (ctx) => {
     const snap = await base.listSkills!(ctx);
-    const p = await profileOf(ctx.agentId);
+    const p = await profileOf(ctx.agentId, (ctx as { companyId?: string | null }).companyId);
     if (!p) return { ...snap, warnings: [...snap.warnings, UNKNOWN_PROFILE] };
     return snapshotForProfile(snap, p.home, p.label);
   };
 
   const syncSkills: NonNullable<Base["syncSkills"]> = async (ctx, desired) => {
     const snap = await base.syncSkills!(ctx, desired);
-    const p = await profileOf(ctx.agentId);
+    const p = await profileOf(ctx.agentId, (ctx as { companyId?: string | null }).companyId);
     if (!p) return { ...snap, warnings: [...snap.warnings, UNKNOWN_PROFILE] };
     const r = await reconcileIntoProfile(ctx.config, p.home, desired);
     const out = await snapshotForProfile(snap, p.home, p.label);
@@ -210,7 +223,7 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
       lightCache = null;
       return hermesModels(await instances());
     },
-    // ne devine plus à partir du premier profil venu : l'affectation est explicite (agents.json)
+    // ne devine plus à partir du premier profil venu : l'affectation est explicite (assignments.json)
     detectModel: async () => (base.detectModel ? base.detectModel() : null),
   };
 }
