@@ -36,6 +36,10 @@ async function get(path) {
   if (!r.ok) throw new Error(`GET ${path} : HTTP ${r.status} — export interrompu, rien n'est écrit`);
   return r.json();
 }
+// collecteur administrateur d'instance ? (GET /admin/users est réservé à l'administrateur : 200 = oui) ; consigné dans l'export
+const adminProbe = await fetch(`${api.replace(/\/$/, "")}/admin/users?query=hermes-control-export`, { headers });
+const collector = { instanceAdmin: adminProbe.status === 200, check: `GET /admin/users → HTTP ${adminProbe.status}` };
+if (!collector.instanceAdmin) console.error(`ATTENTION : collecteur non administrateur d'instance (${collector.check}) : l'export sera REFUSÉ par le retour arrière (couverture invérifiable)`);
 const companiesRaw = await get("/companies");
 const companiesList = Array.isArray(companiesRaw) ? companiesRaw : Array.isArray(companiesRaw?.companies) ? companiesRaw.companies : null;
 if (!companiesList) { console.error("réponse /companies inattendue — rien n'est écrit"); process.exit(2); }
@@ -50,7 +54,7 @@ for (const c of companiesList) {
     agents.push({ id: a.id, name: a.name, companyId: a.companyId ?? c.id, adapterType: a.adapterType ?? null, status: a.status ?? null, hermesCommand: cmd });
   }
 }
-const data = { kind: "hermes-control/agents-export", version: 1, collectedAt: new Date().toISOString(), source: { api, method: "GET /companies + GET /companies/:id/agents" }, companies, agents };
+const data = { kind: "hermes-control/agents-export", version: 1, collectedAt: new Date().toISOString(), source: { api, method: "GET /companies + GET /companies/:id/agents" }, collector, companies, agents };
 const text = JSON.stringify(data, null, 2) + "\n";
 if (out) {
   await writeFile(out, text, { mode: 0o600 });

@@ -166,7 +166,8 @@ describe("6. skills : profil résolu d'abord, écriture seulement dans ce profil
     await mkdir(join(instB, "profiles", "chef", "skills"), { recursive: true });
     await symlink(join(instB, "profiles", "chef", "skills"), join(instA, "profiles", "chef", "skills"));
     const a = createServerAdapter();
-    await expect(a.syncSkills!({ agentId: "chef-a", companyId: "A", adapterType: "hermes_local", config: inv } as never, ["paperclipai/paperclip/first-task"])).rejects.toThrow(/est un lien.*hors du profil/);
+    const s = await a.syncSkills!({ agentId: "chef-a", companyId: "A", adapterType: "hermes_local", config: inv } as never, ["paperclipai/paperclip/first-task"]);
+    expect(s.warnings.join(" ")).toMatch(/est un lien.*hors du profil.*aucun lien n'a été posé/);
     const r = (await a.execute(ctxRun("chef-a", "A", { ...inv }))) as { errorCode: string; errorMessage: string };
     expect(r.errorCode).toBe(REFUSAL_ERROR_CODE);
     expect(r.errorMessage).toMatch(/skills : .*est un lien/);
@@ -240,4 +241,46 @@ describe("11. authentification du modèle manquante / expirée : classe séparé
     expect(recovery.classifyAdapterFailureForRecovery(run)).toBeNull();
     expect(recovery.classifyContinuationFailure(run).kind).toBe("transient_infra");
   }, 60_000);
+});
+
+describe("annulation (constat de recette 0.6.2) : signal du serveur → groupe de processus de Hermes arrêté", () => {
+  it("VRAIE base officielle : Hermes lent avec un descendant ; abandon du signal → execute rend la main, Hermes et son descendant sont arrêtés ; inscription onCancellationReady faite avant le lancement", async () => {
+    const dir = join(root, "lent");
+    await mkdir(dir, { recursive: true });
+    const pids = join(root, "pids");
+    const p = join(dir, "hermes");
+    await writeFile(p, `#!/usr/bin/python3\nimport subprocess, time, os\nc = subprocess.Popen(["/usr/bin/sleep", "300"])\nopen("${pids}", "w").write("%d %d" % (os.getpid(), c.pid))\nprint("lent", flush=True)\ntime.sleep(300)\n`);
+    await chmod(p, 0o755);
+    await setHermesBinary({ binary: p });
+    const ac = new AbortController();
+    const order: string[] = [];
+    const spawned: number[] = [];
+    const a = createServerAdapter(createHermesLocalServerAdapter());
+    const ctx = { runId: "r-cancel", agent: { id: "chef-a", companyId: "A", name: "Chef", adapterType: "hermes_local", adapterConfig: {} }, runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null }, config: { cwd: root, timeoutSec: 120, graceSec: 2 }, context: {}, onLog: async () => {}, signal: ac.signal, onCancellationReady: async () => { order.push("ready"); }, onSpawn: async (m: { pid: number }) => { order.push("spawn"); spawned.push(m.pid); } } as never;
+    const run = a.execute(ctx);
+    for (let i = 0; i < 100 && !existsSync(pids); i++) await new Promise((r) => setTimeout(r, 50));
+    const [hp, cp] = readFileSync(pids, "utf8").split(" ").map(Number) as [number, number];
+    expect(order).toEqual(["ready", "spawn"]);
+    expect(spawned).toEqual([hp]);
+    ac.abort(new Error("Cancelled by control plane"));
+    const r = (await run) as { exitCode: number | null; signal: string | null };
+    expect(r.signal ?? r.exitCode).toBeTruthy();
+    await new Promise((res) => setTimeout(res, 300));
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    expect(alive(hp)).toBe(false);
+    expect(alive(cp)).toBe(false);
+  }, 30_000);
+
+  it("abandon AVANT le lancement : Hermes n'est pas lancé ; sans signal (ancien serveur) : comportement inchangé", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const a = createServerAdapter(createHermesLocalServerAdapter());
+    const ctx = (extra: Record<string, unknown>) => ({ runId: "r", agent: { id: "chef-a", companyId: "A", name: "Chef", adapterType: "hermes_local", adapterConfig: {} }, runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null }, config: { cwd: root, timeoutSec: 30 }, context: {}, onLog: async () => {}, ...extra }) as never;
+    const r = (await a.execute(ctx({ signal: ac.signal, onCancellationReady: async () => {} }))) as { errorMessage?: string };
+    expect(r.errorMessage).toMatch(/annulé avant le lancement/);
+    expect(await fakeCalls(hb)).toEqual([]);
+    const ok = (await a.execute(ctx({}))) as { exitCode: number };
+    expect(ok.exitCode).toBe(0);
+    expect((await fakeCalls(hb)).length).toBe(1);
+  }, 30_000);
 });

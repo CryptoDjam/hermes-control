@@ -30,7 +30,7 @@ type Ag = { id: string; name: string; companyId: string; adapterType: string };
 /** Export conforme (scripts/export-agents.mjs) pour une liste d'agents. */
 function exportOf(agents: Ag[], at = new Date()) {
   const cos = [...new Set(["A", "B", ...agents.map((a) => a.companyId)])];
-  return { kind: "hermes-control/agents-export", version: 1, collectedAt: at.toISOString(), source: { api: "test", method: "test" }, companies: cos.map((id) => ({ id, name: id, agentCount: agents.filter((a) => a.companyId === id).length })), agents };
+  return { kind: "hermes-control/agents-export", version: 1, collectedAt: at.toISOString(), source: { api: "test", method: "test" }, collector: { instanceAdmin: true, check: "test" }, companies: cos.map((id) => ({ id, name: id, agentCount: agents.filter((a) => a.companyId === id).length })), agents };
 }
 const H = (id: string, name: string, companyId: string): Ag => ({ id, name, companyId, adapterType: "hermes_local" });
 
@@ -90,6 +90,8 @@ describe("planRollback / applyRollback (0.6.2 : inventaire complet obligatoire)"
     expect(chk({ ...base, agents: [{ id: "chef-a", name: "Chef", companyId: "A" }] })).toMatch(/sans type d'adaptateur/);
     expect(chk({ ...base, agents: [{ id: "chef-a", name: "Chef", adapterType: "hermes_local" }] })).toMatch(/sans entreprise/);
     expect(chk({ ...base, agents: [], companies: base.companies.map((c) => ({ ...c, agentCount: 0 })) })).toMatch(/chef-a affecté dans la table mais ABSENT de l'export/);
+    expect(chk({ ...base, collector: { instanceAdmin: false, check: "x" } })).toMatch(/SANS droit d'administrateur d'instance/);
+    expect(chk({ ...base, collector: undefined })).toMatch(/SANS droit d'administrateur d'instance/);
   });
 
   it("COMPATIBLE : chaque agent hermes_local retombe sur son profil (ou n'en trouve aucun s'il est non affecté) → carte plate 0.5 écrite après sauvegarde ; la table est conservée", async () => {

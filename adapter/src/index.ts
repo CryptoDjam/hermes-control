@@ -28,6 +28,7 @@ import { ADMINISTERED_ENV, type ExecutionPlan, HermesControlRefusal, NEUTRALIZED
 import { slug } from "../../src/match.js";
 import { describeReference, referenceInfo } from "../../src/reference.js";
 import { exists, readWorkspace } from "../../src/workspace.js";
+import { armCancellation } from "./cancel.js";
 import { type FailureClass, Tail, classifyFailure } from "./failure.js";
 import { managedSnapshot, reconcileIntoProfile, skillsDirProblem, snapshotForProfile } from "./skills.js";
 
@@ -168,8 +169,20 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
       tail.push(text);
       await c.onLog?.(stream, text);
     };
-    const result = await base.execute({ ...(ctx as object), config, onLog, agent: { ...(c.agent as object), adapterConfig: config } } as unknown as Parameters<Base["execute"]>[0]);
-    return classifyResult(result, tail.text(), c);
+    // annulation par signal (le registre de processus du serveur ne voit pas les processus lancés par cet adaptateur)
+    const graceSec = typeof config["graceSec"] === "number" && (config["graceSec"] as number) > 0 ? (config["graceSec"] as number) : 10;
+    const cancel = await armCancellation(ctx as unknown as Parameters<typeof armCancellation>[0], graceSec * 1000);
+    try {
+      if (cancel.abortedBeforeStart()) {
+        await c.onLog?.("stderr", "[hermes-control] passage annulé avant le lancement de Hermes\n");
+        return { exitCode: null, signal: null, timedOut: false, errorMessage: "[hermes-control] passage annulé avant le lancement de Hermes" } as Awaited<ReturnType<Base["execute"]>>;
+      }
+      const result = await base.execute({ ...(ctx as object), config, onLog, onSpawn: cancel.onSpawn, agent: { ...(c.agent as object), adapterConfig: config } } as unknown as Parameters<Base["execute"]>[0]);
+      if (cancel.aborted()) await c.onLog?.("stderr", "[hermes-control] passage annulé : groupe de processus de Hermes arrêté (SIGTERM, puis SIGKILL après le délai de grâce)\n");
+      return classifyResult(result, tail.text(), c);
+    } finally {
+      cancel.dispose();
+    }
   };
 
   /** Échec d'authentification du modèle → rendu `configuration_incomplete` (pas de relance) ; le reste inchangé, classe notée. */
@@ -267,6 +280,13 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
     if (!p) {
       const snap = await managedSnapshot(ctx.config as AnyRecord, desired);
       return { ...snap, warnings: [...snap.warnings, `${UNKNOWN_PROFILE} Aucun lien n'a été posé.`] };
+    }
+    // refus (dossier des skills hors du profil) : instantané avec l'avertissement, AUCUNE écriture (pas d'exception : le
+    // serveur la rendrait en « Internal server error » sans le motif)
+    const problem = await skillsDirProblem(p.home);
+    if (problem) {
+      const snap = await managedSnapshot(ctx.config as AnyRecord, desired);
+      return { ...snap, warnings: [...snap.warnings, `Hermes Control : skills non liés — ${problem} ; aucun lien n'a été posé.`] };
     }
     const r = await reconcileIntoProfile(ctx.config as AnyRecord, p.home, desired);
     const out = await snapshotForProfile(await managedSnapshot(ctx.config as AnyRecord, desired), p.home, p.label);

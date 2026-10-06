@@ -54,6 +54,8 @@ export interface AgentsExport {
   version: 1;
   collectedAt: string; // ISO
   source: { api: string; method: string };
+  /** 0.6.2 : collecteur administrateur d'instance (vérifié par l'export : GET /admin/users répond 200) ; sinon couverture invérifiable. */
+  collector: { instanceAdmin: boolean; check: string };
   companies: { id: string; name: string; agentCount: number }[];
   agents: { id: string; name: string; companyId: string; adapterType: string; status?: string | null; hermesCommand?: string | null }[];
 }
@@ -98,6 +100,7 @@ export function checkExport(raw: unknown, opts: { now: Date; maxAgeMinutes: numb
     return { exp: null, blockers: ["export des agents non reconnu (attendu : kind « hermes-control/agents-export », version 1, produit par scripts/export-agents.mjs ; une simple liste d'agents ne prouve pas la complétude)"], coverage: cov };
   }
   if (!Array.isArray(e.companies) || !Array.isArray(e.agents)) return { exp: null, blockers: ["export incomplet : `companies` et `agents` doivent être des listes"], coverage: cov };
+  if (!e.collector || e.collector.instanceAdmin !== true) blockers.push("export collecté SANS droit d'administrateur d'instance (ou sans le vérifier) : un utilisateur limité ne voit ni toutes les entreprises ni tous les agents, la couverture est invérifiable ; refais l'export en administrateur");
   cov.companies = e.companies.length;
   cov.agents = e.agents.length;
   const at = typeof e.collectedAt === "string" ? new Date(e.collectedAt) : null;
