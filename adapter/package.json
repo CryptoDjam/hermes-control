@@ -1,7 +1,7 @@
 {
   "name": "paperclip-adapter-hermes-control",
-  "version": "0.6.0",
-  "description": "Hermes Control adapter for Paperclip: the agent runs only in the Hermes profile explicitly assigned to it (agents.json, written by the plugin); Provider and Model menus list what Hermes knows; skills assigned in Paperclip are linked into that profile's skills folder. Drop-in override of the built-in hermes_local adapter.",
+  "version": "0.6.1",
+  "description": "Hermes Control adapter for Paperclip: the agent runs only in the Hermes profile explicitly assigned to it (assignments table shared with the plugin), launched with the administered Hermes binary and a controlled environment; configuration refusals are not retried; Provider and Model menus list what Hermes knows; skills assigned in Paperclip are linked into that profile's skills folder. Drop-in override of the built-in hermes_local adapter.",
   "author": "Cyril M",
   "license": "MIT",
   "type": "module",

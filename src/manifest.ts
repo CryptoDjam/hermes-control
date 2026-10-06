@@ -4,13 +4,12 @@
 const manifest = {
   id: "hermes-control",
   apiVersion: 1,
-  version: "0.6.0",
+  version: "0.6.1",
   displayName: "Hermes Control",
   author: "Cyril M",
+  // ≤ 500 caractères : Paperclip 2026.1001.0 refuse au-delà (« description: Too big ») ; vérifié par manifest.test.ts
   description:
-    "Hermes Agent as the engine, Paperclip in charge: every agent runs only in the Hermes profile EXPLICITLY assigned to it (assignments table: company → authorized instances, agent → instance/profile; never by name), " +
-    "and the provider / model / thinking chosen in the agent menu are written to that profile. Actions: assign / unassign an agent, declare a company's authorized instances, prepare a profile in a chosen instance (empty .env). " +
-    "Health: installed / connected / connected-and-synced per agent, watchdog socket path and skill YAML checks. Pair it with the Hermes Control adapter.",
+    "Hermes Agent as the engine, Paperclip in charge. Each agent runs only in the Hermes profile explicitly assigned to it (assignments table, never by name), with the administered binary. Provider, model and thinking chosen in Paperclip are written to that profile. Actions: assign or unassign agents, authorize instances per company, prepare a profile (empty .env). Health per agent: installed / connected / connected-and-synced, socket path and skill checks. Use with the Hermes Control adapter.",
   categories: ["ui", "automation"],
   capabilities: [
     "agents.read",
