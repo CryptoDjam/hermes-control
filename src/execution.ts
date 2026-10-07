@@ -18,11 +18,11 @@ import { type ResolvedAssignment, resolveAssignment } from "./assignments.js";
 import { type VerifiedHermesBinary, verifyHermesBinary } from "./binary.js";
 import { type SocketPathCheck, checkSocketPaths, socketPathAlert } from "./health.js";
 import { readConfigStrict } from "./hermes.js";
-import { legacyEnvRefusal } from "./paths.js";
+import { accountHome, accountName, legacyEnvRefusal } from "./paths.js";
 import { profileUsability } from "./prepare.js";
 import { exists } from "./workspace.js";
 
-export type RefusalKind = "reference" | "not_assigned" | "assignment" | "table" | "profile" | "binary" | "execution_root" | "socket" | "arguments";
+export type RefusalKind = "reference" | "not_assigned" | "assignment" | "table" | "profile" | "binary" | "execution_root" | "socket" | "arguments" | "runtime";
 
 /** Refus de configuration : Paperclip ne doit pas le réessayer (rien ne changera sans un geste d'administration). */
 export class HermesControlRefusal extends Error {
@@ -41,8 +41,13 @@ export interface ExecutionPlan {
   socket: SocketPathCheck;
 }
 
-/** Variables que `config.env` ne peut pas fixer : posées ou neutralisées par l'adaptateur. */
-export const ADMINISTERED_ENV = ["HERMES_HOME", "PATH"] as const;
+/**
+ * Variables que `config.env` ne peut pas fixer. 0.6.3 (voie 1) : l'environnement du processus Hermes est FINAL (liste
+ * blanche du correctif local, rien n'est hérité du serveur) ; HERMES_HOME est posé ici, PATH / HOME / USER / LOGNAME sont
+ * construits par le correctif (binaire administré + chemin système ; compte getpwuid). Les autres noms de config.env
+ * passent par la liste blanche du correctif (journal du passage : noms refusés).
+ */
+export const ADMINISTERED_ENV = ["HERMES_HOME", "PATH", "HOME", "USER", "LOGNAME"] as const;
 export const NEUTRALIZED_ENV = [
   "PYTHONPATH",
   "PYTHONHOME",
@@ -77,6 +82,13 @@ export function checkExtraArgs(extraArgs: unknown): string | null {
  * utilisable, binaire administré vérifié, HERMES_HOME littéral = même profil que l'affectation, sockets sous la limite.
  */
 export async function planExecution(agent: { id?: string; name: string; companyId?: string | null }): Promise<ExecutionPlan> {
+  // 0.6.3 : le compte d'exécution doit se résoudre (getpwuid, dossier absolu) — sinon refus de configuration, sans repli
+  try {
+    accountHome();
+    accountName();
+  } catch (e) {
+    throw new HermesControlRefusal("reference", (e as Error).message);
+  }
   const legacy = legacyEnvRefusal();
   if (legacy) throw new HermesControlRefusal("reference", legacy);
   const r = await resolveAssignment(agent.id ?? "", { companyId: agent.companyId ?? null });
@@ -113,11 +125,12 @@ export async function planExecution(agent: { id?: string; name: string; companyI
 }
 
 /**
- * Environnement à transmettre (fusionné par l'adaptateur de base APRÈS celui du serveur) : `config.env` sans les clés
- * réservées, puis HERMES_HOME et PATH administrés, puis les variables neutralisées à vide (CPython et ld.so ignorent une
- * valeur vide). `dropped` : clés de `config.env` écartées (noms seulement, pour le journal).
+ * `config.env` transmis à l'adaptateur de base (0.6.3, voie 1) : sans les clés réservées, puis HERMES_HOME administré.
+ * Le correctif local en fait l'environnement FINAL (liste blanche, rien du serveur). `dropped` : clés de `config.env`
+ * écartées ici (noms seulement, pour le journal). NEUTRALIZED_ENV reste écarté (et refusé de toute façon par la liste
+ * blanche) ; plus besoin de le vider : rien n'est hérité.
  */
-export function buildAgentEnv(configEnv: unknown, plan: Pick<ExecutionPlan, "hermesHome" | "binary">, serverPath: string | undefined = process.env["PATH"]): { env: Record<string, unknown>; dropped: string[] } {
+export function buildAgentEnv(configEnv: unknown, plan: Pick<ExecutionPlan, "hermesHome">): { env: Record<string, unknown>; dropped: string[] } {
   const env: Record<string, unknown> = {};
   const dropped: string[] = [];
   if (configEnv && typeof configEnv === "object" && !Array.isArray(configEnv)) {
@@ -126,10 +139,6 @@ export function buildAgentEnv(configEnv: unknown, plan: Pick<ExecutionPlan, "her
       else env[k] = v;
     }
   }
-  const path: string[] = [];
-  for (const d of [...plan.binary.pathPrefix, ...(serverPath ?? "/usr/local/bin:/usr/bin:/bin").split(":")]) if (d && isAbsolute(d) && !path.includes(d)) path.push(d);
-  for (const k of NEUTRALIZED_ENV) env[k] = "";
-  env["PATH"] = path.join(":");
   env["HERMES_HOME"] = plan.hermesHome;
   return { env, dropped };
 }

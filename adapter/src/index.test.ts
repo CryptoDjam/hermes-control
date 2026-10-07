@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { createHermesLocalServerAdapter } from "@paperclipai/hermes-paperclip-adapter";
 import { assignAgent, assignmentsFile, setCompanyInstances, setExecutionRoot, setHermesBinary } from "../../src/assignments.js";
@@ -282,19 +282,20 @@ describe("exécution maîtrisée : seul le binaire ADMINISTRÉ est lancé, avec 
     expect(calls).toHaveLength(1);
   });
 
-  it("config.env ne peut écraser ni HERMES_HOME, ni PATH, ni PYTHON*/LD_* ; les autres clés passent ; PATH = dossier de l'interpréteur d'abord", async () => {
+  it("config.env ne peut écraser ni HERMES_HOME, ni PATH, ni PYTHON*/LD_*, ni HOME/USER/LOGNAME : retirés ici ; HERMES_HOME administré ; les autres clés vont à la liste blanche du correctif (0.6.3)", async () => {
     const { a, calls } = withSpy();
     await assignApolline();
     const logs: string[] = [];
-    await a.execute(ctxFor("ok", "Apolline M", logs, { env: { HERMES_HOME: join(root, "b"), PATH: "/evil", PYTHONPATH: "/evil", LD_PRELOAD: "/evil.so", CUSTOM_KEY: "garde" } }));
+    await a.execute(ctxFor("ok", "Apolline M", logs, { env: { HERMES_HOME: join(root, "b"), PATH: "/evil", PYTHONPATH: "/evil", LD_PRELOAD: "/evil.so", HOME: "/tmp/hostile", CUSTOM_KEY: "garde" } }));
     const env = calls[0]!["env"] as Record<string, string>;
     expect(env["HERMES_HOME"]).toBe(HOME_APOLLINE());
-    expect(env["PATH"]!.split(":")[0]).toBe(dirname(PYTHON));
-    expect(env["PATH"]).not.toContain("/evil");
-    expect(env["PYTHONPATH"]).toBe("");
-    expect(env["LD_PRELOAD"]).toBe("");
-    expect(env["CUSTOM_KEY"]).toBe("garde");
-    expect(logs.join("")).toMatch(/env de l'agent : HERMES_HOME, PATH, PYTHONPATH, LD_PRELOAD ignoré/);
+    expect(env).not.toHaveProperty("PATH");
+    expect(env).not.toHaveProperty("PYTHONPATH");
+    expect(env).not.toHaveProperty("LD_PRELOAD");
+    expect(env).not.toHaveProperty("HOME");
+    expect(env["CUSTOM_KEY"]).toBe("garde"); // décidé ensuite par la liste blanche du correctif
+    expect(logs.join("")).toMatch(/env de l'agent : HERMES_HOME, PATH, PYTHONPATH, LD_PRELOAD, HOME ignoré/);
+    expect(logs.join("")).toMatch(/voie 1 : hermes-control-voie1\/hermes-paperclip-adapter@2026\.1001\.0\/2 ; adapter-utils chargé/);
   });
 
   it("extraArgs avec -p / --profile → refus (Hermes changerait de profil après le contrôle)", async () => {
@@ -329,8 +330,15 @@ describe("exécution maîtrisée : seul le binaire ADMINISTRÉ est lancé, avec 
       expect(calls[0]!.argv[0]).toBe("chat");
       expect(calls[0]!.argv).toContain("--yolo");
       expect(calls[0]!.HERMES_HOME).toBe(HOME_APOLLINE());
-      expect(calls[0]!.PATH.split(":")[0]).toBe(dirname(PYTHON));
-      expect(calls[0]!.env["CUSTOM_KEY"]).toBe("v");
+      // 0.6.3 (voie 1) : PATH FIXÉ = dossier du binaire administré + chemin système ; rien du PATH du serveur
+      expect(calls[0]!.PATH).toBe(`${dirname(fake)}:/usr/local/bin:/usr/bin:/bin`);
+      expect(calls[0]!.PATH).not.toContain(evil);
+      // HOME du compte (getpwuid), pas le HOME du processus (temporaire des tests)
+      expect(calls[0]!.env["HOME"]).toBe(userInfo().homedir);
+      expect(calls[0]!.env["HOME"]).not.toBe(process.env["HOME"]);
+      // CUSTOM_KEY hors liste blanche : refusé (nom seulement dans le journal)
+      expect(calls[0]!.env).not.toHaveProperty("CUSTOM_KEY");
+      expect(logs.join("")).toMatch(/refusées depuis config\.env : .*CUSTOM_KEY \(hors liste blanche\)/);
       expect(calls[0]!.env["PAPERCLIP_AGENT_ID"]).toBe("ok");
       expect(existsSync(marker)).toBe(false); // ni le faux hermes du PATH, ni l'ancien lanceur
     } finally {

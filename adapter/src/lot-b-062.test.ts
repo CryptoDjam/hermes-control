@@ -9,7 +9,8 @@ import { createHermesLocalServerAdapter } from "@paperclipai/hermes-paperclip-ad
 import { assignAgent, setCompanyInstances, setHermesBinary } from "../../src/assignments.js";
 import { fakeCalls, makeFakeHermes, writeRoots } from "../../src/testkit.js";
 import { classifyFailure } from "./failure.js";
-import { REFUSAL_ERROR_CODE, createServerAdapter } from "./index.js";
+import { REFUSAL_ERROR_CODE, createServerAdapter, voie1Status } from "./index.js";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 let root: string;
 let instA: string;
@@ -243,46 +244,86 @@ describe("11. authentification du modèle manquante / expirée : classe séparé
   }, 60_000);
 });
 
-describe("annulation (constat de recette 0.6.2) : signal du serveur → groupe de processus de Hermes arrêté", () => {
-  it("VRAIE base officielle : Hermes lent avec un descendant ; abandon du signal → execute rend la main, Hermes et son descendant sont arrêtés ; inscription onCancellationReady faite avant le lancement", async () => {
-    const dir = join(root, "lent");
+describe("annulation et délai maximal (0.6.3 : portés par le correctif voie 1, un seul propriétaire)", () => {
+  // Hermes lent : un descendant qui IGNORE SIGTERM, puis attente ; pids écrits pour vérifier l'arrêt du groupe entier
+  async function slowHermes(name: string): Promise<{ pids: string }> {
+    const dir = join(root, name);
     await mkdir(dir, { recursive: true });
-    const pids = join(root, "pids");
+    const pids = join(root, `${name}.pids`);
     const p = join(dir, "hermes");
-    await writeFile(p, `#!/usr/bin/python3\nimport subprocess, time, os\nc = subprocess.Popen(["/usr/bin/sleep", "300"])\nopen("${pids}", "w").write("%d %d" % (os.getpid(), c.pid))\nprint("lent", flush=True)\ntime.sleep(300)\n`);
+    await writeFile(p, `#!/usr/bin/python3\nimport subprocess, time, os\nc = subprocess.Popen(["/usr/bin/python3", "-c", "import signal,time\\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\\ntime.sleep(300)"])\nopen("${pids}", "w").write("%d %d" % (os.getpid(), c.pid))\nprint("lent", flush=True)\ntime.sleep(300)\n`);
     await chmod(p, 0o755);
     await setHermesBinary({ binary: p });
+    return { pids };
+  }
+  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const baseCtx = (extra: Record<string, unknown>, config: Record<string, unknown>) => ({ runId: "r-cancel", agent: { id: "chef-a", companyId: "A", name: "Chef", adapterType: "hermes_local", adapterConfig: {} }, runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null }, config: { cwd: root, ...config }, context: {}, onLog: async () => {}, ...extra }) as never;
+
+  it("VRAIE base corrigée : abandon du signal → groupe ENTIER arrêté (descendant qui ignore SIGTERM compris), acquitté parce que vérifié vide ; inscription onCancellationReady avant le lancement", async () => {
+    const { pids } = await slowHermes("lent");
     const ac = new AbortController();
     const order: string[] = [];
     const spawned: number[] = [];
+    const logs: string[] = [];
     const a = createServerAdapter(createHermesLocalServerAdapter());
-    const ctx = { runId: "r-cancel", agent: { id: "chef-a", companyId: "A", name: "Chef", adapterType: "hermes_local", adapterConfig: {} }, runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null }, config: { cwd: root, timeoutSec: 120, graceSec: 2 }, context: {}, onLog: async () => {}, signal: ac.signal, onCancellationReady: async () => { order.push("ready"); }, onSpawn: async (m: { pid: number }) => { order.push("spawn"); spawned.push(m.pid); } } as never;
-    const run = a.execute(ctx);
+    const run = a.execute(baseCtx({ signal: ac.signal, onLog: async (_s: string, t: string) => { logs.push(t); }, onCancellationReady: async () => { order.push("ready"); }, onSpawn: async (m: { pid: number }) => { order.push("spawn"); spawned.push(m.pid); } }, { timeoutSec: 120, graceSec: 1 }));
     for (let i = 0; i < 100 && !existsSync(pids); i++) await new Promise((r) => setTimeout(r, 50));
     const [hp, cp] = readFileSync(pids, "utf8").split(" ").map(Number) as [number, number];
-    expect(order).toEqual(["ready", "spawn"]);
+    expect(order).toEqual(["ready", "spawn"]); // une seule inscription : celle du correctif
     expect(spawned).toEqual([hp]);
     ac.abort(new Error("Cancelled by control plane"));
-    const r = (await run) as { exitCode: number | null; signal: string | null; resultJson?: Record<string, { state?: string; proof?: string }> };
-    expect(r.signal ?? r.exitCode).toBeTruthy();
-    // arrêt acquitté seulement parce que le groupe est vérifié vide (Paperclip l'exige pour confirmer l'annulation)
-    expect(r.resultJson?.["executionCancellation"]).toMatchObject({ state: "acknowledged", proof: "hermes_control_process_group_empty" });
-    await new Promise((res) => setTimeout(res, 300));
-    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    const r = (await run) as { errorCode?: string; resultJson?: Record<string, { state?: string; forced?: boolean }> };
+    expect(r.errorCode).toBe("cancelled");
+    expect(r.resultJson?.["executionCancellation"]).toMatchObject({ state: "acknowledged", forced: true });
+    expect(alive(hp)).toBe(false);
+    expect(alive(cp)).toBe(false); // vérifié AVANT l'acquittement (le correctif attend que le groupe soit vide)
+    expect(logs.join("")).toMatch(/groupe de processus de Hermes arrêté et vérifié vide .*arrêt acquitté/);
+  }, 30_000);
+
+  it("VRAIE base corrigée : délai maximal (timeoutSec) → timed_out et groupe entier arrêté après le délai de grâce", async () => {
+    const { pids } = await slowHermes("lent-delai");
+    const a = createServerAdapter(createHermesLocalServerAdapter());
+    const r = (await a.execute(baseCtx({}, { timeoutSec: 2, graceSec: 1 }))) as { timedOut: boolean };
+    expect(r.timedOut).toBe(true);
+    const [hp, cp] = readFileSync(pids, "utf8").split(" ").map(Number) as [number, number];
+    for (let i = 0; i < 40 && (alive(hp) || alive(cp)); i++) await new Promise((res) => setTimeout(res, 100));
     expect(alive(hp)).toBe(false);
     expect(alive(cp)).toBe(false);
   }, 30_000);
 
-  it("abandon AVANT le lancement : Hermes n'est pas lancé ; sans signal (ancien serveur) : comportement inchangé", async () => {
+  it("abandon AVANT le lancement : Hermes n'est pas lancé, arrêt acquitté ; sans signal (ancien serveur) : comportement inchangé", async () => {
     const ac = new AbortController();
     ac.abort();
     const a = createServerAdapter(createHermesLocalServerAdapter());
-    const ctx = (extra: Record<string, unknown>) => ({ runId: "r", agent: { id: "chef-a", companyId: "A", name: "Chef", adapterType: "hermes_local", adapterConfig: {} }, runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null }, config: { cwd: root, timeoutSec: 30 }, context: {}, onLog: async () => {}, ...extra }) as never;
-    const r = (await a.execute(ctx({ signal: ac.signal, onCancellationReady: async () => {} }))) as { errorMessage?: string };
-    expect(r.errorMessage).toMatch(/annulé avant le lancement/);
+    const r = (await a.execute(baseCtx({ signal: ac.signal, onCancellationReady: async () => {} }, { timeoutSec: 30 }))) as { errorMessage?: string; resultJson?: Record<string, { state?: string }> };
+    expect(r.errorMessage).toMatch(/Stopped before Hermes startup/);
+    expect(r.resultJson?.["executionCancellation"]?.state).toBe("acknowledged");
     expect(await fakeCalls(hb)).toEqual([]);
-    const ok = (await a.execute(ctx({}))) as { exitCode: number };
+    const ok = (await a.execute(baseCtx({}, { timeoutSec: 30 }))) as { exitCode: number };
     expect(ok.exitCode).toBe(0);
     expect((await fakeCalls(hb)).length).toBe(1);
   }, 30_000);
+
+  it("Hermes Control ne réécrit JAMAIS l'état d'annulation du correctif : « unverified » reste non acquitté", async () => {
+    const fakeBase = { ...createHermesLocalServerAdapter(), execute: async () => ({ exitCode: null, signal: "SIGKILL", timedOut: false, errorCode: "cancelled", resultJson: { executionCancellation: { state: "unverified", forced: true } } }) };
+    const a = createServerAdapter(fakeBase as never);
+    const logs: string[] = [];
+    const r = (await a.execute(baseCtx({ onLog: async (_s: string, t: string) => { logs.push(t); } }, { timeoutSec: 30 }))) as { resultJson?: Record<string, { state?: string }> };
+    expect(r.resultJson?.["executionCancellation"]?.state).toBe("unverified");
+    expect(logs.join("")).toMatch(/NON vérifié .*non acquitté/);
+  });
+
+  it("copies NON corrigées chargées (marqueurs absents) → refus de configuration, Hermes non lancé", async () => {
+    expect(voie1Status({}).ok).toBe(false);
+    expect(voie1Status({ HERMES_FINAL_ENV_PATCH: "x", HERMES_FINAL_ENV_ADAPTER_UTILS: { patch: null, url: "file:///autre/adapter-utils" } }).message).toMatch(/adapter-utils non corrigé \(file:\/\/\/autre/);
+    const real = voie1Status();
+    expect(real.ok).toBe(true);
+    // la copie d'adapter-utils réellement importée par l'adaptateur officiel est celle de CE dossier (pas une autre copie)
+    expect(real.adapterUtilsUrl).toBe(pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "node_modules", "@paperclipai", "adapter-utils", "dist", "server-utils.js")).href);
+    const a = createServerAdapter(createHermesLocalServerAdapter(), { finalEnvModule: {} });
+    const r = (await a.execute(baseCtx({}, { timeoutSec: 30 }))) as { errorCode?: string; errorMessage?: string };
+    expect(r.errorCode).toBe("configuration_incomplete");
+    expect(r.errorMessage).toMatch(/copies corrigées \(voie 1\) ABSENTES/);
+    expect(await fakeCalls(hb)).toEqual([]);
+  });
 });

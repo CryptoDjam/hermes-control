@@ -14,10 +14,14 @@
 //    d'écriture ni de lecture dans `$HOME/.hermes/skills` (l'inventaire n'est plus transmis à l'adaptateur officiel) ;
 //  - 0.6.2 : « Test environment » STATIQUE (rien n'est exécuté) ; un échec d'authentification du MODÈLE est rendu
 //    `configuration_incomplete` (pas de relance en boucle), une panne transitoire reste réessayable.
-// 0.6.2 = recette seulement : l'environnement FINAL du processus Hermes n'est pas corrigé (variables du serveur héritées
-// par l'adaptateur officiel) ; déploiement bloqué.
+// 0.6.3 (recette seulement) — VOIE 1 : l'adaptateur officiel et adapter-utils sont des COPIES CORRIGÉES localement
+// (adapter/voie1 : base 2026.1001.0 publiée + correctifs, intégrité et empreintes vérifiées à la fabrication). Le processus
+// Hermes reçoit un environnement FINAL construit par liste blanche (rien du serveur ; HOME/USER/LOGNAME du compte) ;
+// l'annulation est portée par le correctif (signal du serveur → groupe arrêté → acquittement seulement si le groupe est
+// vide). Au passage, l'adaptateur VÉRIFIE que les copies réellement chargées sont corrigées, sinon refus.
 // Auteur : Cyril M — MIT.
 import { createHermesLocalServerAdapter } from "@paperclipai/hermes-paperclip-adapter";
+import * as hermesServer from "@paperclipai/hermes-paperclip-adapter/server";
 import { join } from "node:path";
 import { discoverLight } from "../../src/discovery.js";
 import { type HermesInstance, readModelCatalogs } from "../../src/hermes.js";
@@ -28,7 +32,6 @@ import { ADMINISTERED_ENV, type ExecutionPlan, HermesControlRefusal, NEUTRALIZED
 import { slug } from "../../src/match.js";
 import { describeReference, referenceInfo } from "../../src/reference.js";
 import { exists, readWorkspace } from "../../src/workspace.js";
-import { armCancellation } from "./cancel.js";
 import { type FailureClass, Tail, classifyFailure } from "./failure.js";
 import { managedSnapshot, reconcileIntoProfile, skillsDirProblem, snapshotForProfile } from "./skills.js";
 
@@ -106,8 +109,22 @@ function refusalResult(agent: { id?: string; name: string; companyId?: string | 
   };
 }
 
+/** État des copies corrigées (voie 1) RÉELLEMENT chargées : marqueurs exportés par les modules résolus à l'exécution. */
+export function voie1Status(mod: Record<string, unknown> = hermesServer as unknown as Record<string, unknown>): { ok: boolean; hermes: string | null; adapterUtils: string | null; adapterUtilsUrl: string | null; message: string } {
+  const hermes = typeof mod["HERMES_FINAL_ENV_PATCH"] === "string" ? (mod["HERMES_FINAL_ENV_PATCH"] as string) : null;
+  const au = (mod["HERMES_FINAL_ENV_ADAPTER_UTILS"] ?? null) as { patch?: unknown; url?: unknown } | null;
+  const adapterUtils = au && typeof au.patch === "string" ? au.patch : null;
+  const adapterUtilsUrl = au && typeof au.url === "string" ? au.url : null;
+  const ok = !!hermes && !!adapterUtils;
+  const message = ok
+    ? `voie 1 : ${hermes} ; adapter-utils chargé par l'adaptateur officiel : ${adapterUtilsUrl} (${adapterUtils})`
+    : `copies corrigées (voie 1) ABSENTES : hermes-paperclip-adapter ${hermes ?? "non corrigé"}, adapter-utils ${adapterUtils ?? "non corrigé"}${adapterUtilsUrl ? ` (${adapterUtilsUrl})` : ""} — l'environnement final ne serait pas appliqué ; réinstalle l'adaptateur depuis son archive (npm ci sur son verrou)`;
+  return { ok, hermes, adapterUtils, adapterUtilsUrl, message };
+}
+
 /** `base` injectable (tests) : par défaut l'adaptateur Hermes officiel. */
-export function createServerAdapter(base: Base = createHermesLocalServerAdapter()): Base {
+export function createServerAdapter(base: Base = createHermesLocalServerAdapter(), opts: { finalEnvModule?: Record<string, unknown> } = {}): Base {
+  const finalEnv = () => voie1Status(opts.finalEnvModule);
   const execute: Base["execute"] = async (ctx) => {
     const c = ctx as unknown as { config?: AnyRecord; onLog?: (stream: "stdout" | "stderr", text: string) => Promise<void> | void; agent: { id?: string; name: string; companyId?: string | null; adapterConfig?: unknown } };
     const config: AnyRecord = { ...((c.config ?? (c.agent.adapterConfig as AnyRecord | undefined)) ?? {}) };
@@ -115,6 +132,8 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
     try {
       const badArgs = checkExtraArgs(config["extraArgs"]);
       if (badArgs) throw new HermesControlRefusal("arguments", badArgs);
+      const v1 = finalEnv();
+      if (!v1.ok) throw new HermesControlRefusal("runtime", v1.message);
       plan = await planExecution(c.agent);
       // skills : le dossier du profil affecté doit être dans le profil (sinon refus AVANT toute écriture)
       if (Object.prototype.hasOwnProperty.call(config, "paperclipRuntimeSkills")) {
@@ -147,9 +166,10 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
         await c.onLog?.("stdout", `[hermes-control] working directory = ${dir}\n`);
       }
     }
+    await c.onLog?.("stdout", `[hermes-control] ${finalEnv().message}\n`);
     await c.onLog?.("stdout", `[hermes-control] ${c.agent.name} → Hermes ${m.instanceHome.split("/").pop()}/${m.profile} (affectation explicite, ${m.source === "table" ? "table" : "projection à même empreinte"}, par ${m.assignedBy} le ${m.assignedAt}) · HERMES_HOME=${plan.hermesHome}${plan.hermesHome !== m.home ? ` (= ${m.home})` : ""} · socket max ${plan.socket.socketPathBytes} octets · binaire ${describeBinary(plan.binary)}\n`);
     if (ignored.length) await c.onLog?.("stdout", `[hermes-control] commande de l'agent ignorée (${ignored.join(", ")}) : seul le binaire administré est lancé\n`);
-    if (dropped.length) await c.onLog?.("stdout", `[hermes-control] env de l'agent : ${dropped.join(", ")} ignoré(s) (administré par Hermes Control)\n`);
+    if (dropped.length) await c.onLog?.("stdout", `[hermes-control] env de l'agent : ${dropped.join(", ")} ignoré(s) (administré par Hermes Control ; environnement final construit par la voie 1)\n`);
     if (Object.prototype.hasOwnProperty.call(config, "paperclipRuntimeSkills")) {
       try {
         const r = await reconcileIntoProfile(config, m.home);
@@ -169,27 +189,19 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
       tail.push(text);
       await c.onLog?.(stream, text);
     };
-    // annulation par signal (le registre de processus du serveur ne voit pas les processus lancés par cet adaptateur)
-    const graceSec = typeof config["graceSec"] === "number" && (config["graceSec"] as number) > 0 ? (config["graceSec"] as number) : 10;
-    const cancel = await armCancellation(ctx as unknown as Parameters<typeof armCancellation>[0], graceSec * 1000);
-    try {
-      if (cancel.abortedBeforeStart()) {
-        await c.onLog?.("stderr", "[hermes-control] passage annulé avant le lancement de Hermes\n");
-        return { exitCode: null, signal: null, timedOut: false, errorMessage: "[hermes-control] passage annulé avant le lancement de Hermes" } as Awaited<ReturnType<Base["execute"]>>;
-      }
-      const result = await base.execute({ ...(ctx as object), config, onLog, onSpawn: cancel.onSpawn, agent: { ...(c.agent as object), adapterConfig: config } } as unknown as Parameters<Base["execute"]>[0]);
-      if (cancel.aborted()) {
-        const stopped = await cancel.confirmStopped();
-        await c.onLog?.("stderr", stopped ? "[hermes-control] passage annulé : groupe de processus de Hermes arrêté et vérifié vide (SIGTERM, puis SIGKILL après le délai de grâce)\n" : "[hermes-control] passage annulé : des processus du groupe de Hermes sont ENCORE vivants après le délai de grâce ; arrêt NON acquitté\n");
-        const r = result as { resultJson?: Record<string, unknown> | null };
-        // acquittement exigé par Paperclip 2026.1001.0 pour confirmer l'arrêt (sinon : « provider termination could not be verified »)
-        if (stopped) return { ...result, resultJson: { ...(r.resultJson ?? {}), executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString(), proof: "hermes_control_process_group_empty" } } } as Awaited<ReturnType<Base["execute"]>>;
-        return result;
-      }
-      return classifyResult(result, tail.text(), c);
-    } finally {
-      cancel.dispose();
+    // ANNULATION (0.6.3) : portée par le correctif voie 1 (un seul propriétaire). ctx.signal et ctx.onCancellationReady
+    // sont transmis tels quels à l'adaptateur officiel corrigé : inscription avant le lancement, SIGTERM au groupe puis
+    // SIGKILL après graceSec, groupe vérifié vide → executionCancellation « acknowledged », sinon « unverified » (le
+    // serveur répond alors que l'arrêt n'a pas pu être vérifié). Hermes Control ne réécrit JAMAIS cet état.
+    const result = await base.execute({ ...(ctx as object), config, onLog, agent: { ...(c.agent as object), adapterConfig: config } } as unknown as Parameters<Base["execute"]>[0]);
+    const cancellation = ((result as { resultJson?: Record<string, unknown> | null }).resultJson?.["executionCancellation"] ?? null) as { state?: string; forced?: boolean } | null;
+    if (cancellation) {
+      await c.onLog?.("stderr", cancellation.state === "acknowledged"
+        ? `[hermes-control] passage annulé : groupe de processus de Hermes arrêté et vérifié vide${cancellation.forced ? " (SIGKILL après le délai de grâce)" : ""} ; arrêt acquitté\n`
+        : `[hermes-control] passage annulé : arrêt du groupe de Hermes NON vérifié (état ${cancellation.state ?? "?"}) ; non acquitté\n`);
+      return result;
     }
+    return classifyResult(result, tail.text(), c);
   };
 
   /** Échec d'authentification du modèle → rendu `configuration_incomplete` (pas de relance) ; le reste inchangé, classe notée. */
@@ -245,6 +257,8 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
     if (reserved.length) checks.push({ code: "hermes_control.env_dropped", level: "warn", message: `Hermes Control : variables ignorées au passage (${reserved.join(", ")})`, detail: null, hint: "HERMES_HOME, PATH, PYTHON*, LD_* … sont administrés par Hermes Control." });
     const badArgs = checkExtraArgs(config["extraArgs"]);
     if (badArgs) checks.push({ code: "hermes_control.arguments", level: "error", message: `Hermes Control : ${badArgs}`, detail: null, hint: null });
+    const v1 = finalEnv();
+    checks.push({ code: "hermes_control.final_env", level: v1.ok ? "info" : "error", message: `Hermes Control : ${v1.message}`, detail: null, hint: v1.ok ? "Le processus Hermes reçoit un environnement final par liste blanche (rien du serveur) ; les noms de config.env hors liste sont refusés au passage (journal)." : "Aucun passage sans les copies corrigées." });
     const ref = await referenceInfo();
     checks.push({ code: "hermes_control.reference", level: ref.legacyEnv.length ? "error" : "info", message: `Hermes Control : ${describeReference(ref)}`, detail: null, hint: ref.legacyEnv.length ? `Retire ${ref.legacyEnv.join(", ")} de l'environnement du service : plus lues depuis 0.6.1.` : "Plugin et adaptateur lisent ce même dossier (calculé depuis le compte Unix, pas depuis l'environnement)." });
     const read = await readAssignments();

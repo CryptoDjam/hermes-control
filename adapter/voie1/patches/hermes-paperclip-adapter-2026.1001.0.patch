@@ -1,0 +1,334 @@
+diff -ruN a/hermes-paperclip-adapter/dist/server/execute.js b/hermes-paperclip-adapter/dist/server/execute.js
+--- a/hermes-paperclip-adapter/dist/server/execute.js	2026-10-01 02:00:00.000000000 +0200
++++ b/hermes-paperclip-adapter/dist/server/execute.js	2026-10-01 02:00:00.000000000 +0200
+@@ -23,6 +23,15 @@
+ import { HERMES_CLI, DEFAULT_TIMEOUT_SEC, DEFAULT_GRACE_SEC, DEFAULT_MODEL, } from "../shared/constants.js";
+ import { detectModel, resolveProvider, } from "./detect-model.js";
+ import { reconcileHermesPaperclipSkills } from "./skills.js";
++import { buildFinalEnv, describeFinalEnv, resolveCommandAbsolute } from "./final-env.js";
++import * as finalEnvAdapterUtils from "@paperclipai/adapter-utils/server-utils";
++/** Marqueur du correctif local « voie 1 » (Hermes Control 0.6.3) : environnement final + annulation par signal. */
++export const HERMES_FINAL_ENV_PATCH = "hermes-control-voie1/hermes-paperclip-adapter@2026.1001.0/2";
++/** Copie d'adapter-utils RÉELLEMENT importée par ce module (marqueur du correctif et URL résolue). */
++export const HERMES_FINAL_ENV_ADAPTER_UTILS = Object.freeze({
++    patch: finalEnvAdapterUtils.RUN_CHILD_PROCESS_FINAL_ENV_PATCH ?? null,
++    url: import.meta.resolve("@paperclipai/adapter-utils/server-utils"),
++});
+ // ---------------------------------------------------------------------------
+ // Config helpers
+ // ---------------------------------------------------------------------------
+@@ -395,35 +404,31 @@
+     if (extraArgs?.length) {
+         args.push(...extraArgs);
+     }
+-    // ── Build environment ──────────────────────────────────────────────────
+-    const userEnv = config.env;
+-    const env = {
+-        ...process.env,
+-        ...(userEnv && typeof userEnv === "object" ? userEnv : {}),
+-        ...buildPaperclipEnv(ctx.agent),
+-        ...buildRuntimeToolsEnv(ctx.runtimeTools),
+-    };
+-    if (ctx.runId)
+-        env.PAPERCLIP_RUN_ID = ctx.runId;
+-    // PAPERCLIP_API_KEY is never accepted from config — the harness-minted run
+-    // token is the only source of Paperclip API identity.
+-    delete env.PAPERCLIP_API_KEY;
+-    if (ctx.authToken)
+-        env.PAPERCLIP_API_KEY = ctx.authToken;
+-    // BUG FIX: Read task context from ctx.context (wake context), not ctx.config (adapter config)
++    // ── Build environment (FINAL : liste blanche, aucune variable héritée du serveur) ──
++    // adapter-utils NON corrigé : inheritEnv:false serait ignoré (tout l'environnement du serveur hérité) → refus explicite
++    if (!HERMES_FINAL_ENV_ADAPTER_UTILS.patch) {
++        throw new Error(`[hermes] correctif local adapter-utils absent (${HERMES_FINAL_ENV_ADAPTER_UTILS.url}) : l'environnement final ne serait pas appliqué ; Hermes n'est pas lancé`);
++    }
++    const userEnv = config.env && typeof config.env === "object" ? config.env : {};
+     const ctxContext = ctx.context || {};
+-    const envTaskId = cfgString(ctxContext.taskId) || cfgString(ctxContext.issueId) || cfgString(ctx.config?.taskId);
+-    if (envTaskId)
+-        env.PAPERCLIP_TASK_ID = envTaskId;
+-    const envWakeReason = cfgString(ctxContext.wakeReason) || cfgString(ctx.config?.wakeReason);
+-    if (envWakeReason)
+-        env.PAPERCLIP_WAKE_REASON = envWakeReason;
+-    const envCommentId = cfgString(ctxContext.commentId) || cfgString(ctxContext.wakeCommentId) || cfgString(ctx.config?.commentId);
+-    if (envCommentId)
+-        env.PAPERCLIP_WAKE_COMMENT_ID = envCommentId;
+-    const wakePayloadJson = stringifyPaperclipWakePayload(ctxContext.paperclipWake);
+-    if (wakePayloadJson)
+-        env.PAPERCLIP_WAKE_PAYLOAD_JSON = wakePayloadJson;
++    // binaire : chemin absolu ; un nom nu est cherché dans le PATH du serveur (lecture seule, PATH non transmis)
++    const resolvedHermesCmd = resolveCommandAbsolute(hermesCmd, process.env.PATH);
++    const requestedHermesHome = typeof userEnv.HERMES_HOME === "string" && path.isAbsolute(userEnv.HERMES_HOME)
++        ? path.resolve(userEnv.HERMES_HOME)
++        : undefined;
++    const operatorAllowed = (process.env.PAPERCLIP_HERMES_ENV_ALLOW ?? "").split(",").map((x) => x.trim()).filter(Boolean);
++    const finalEnv = buildFinalEnv({
++        ctx,
++        configEnv: userEnv,
++        hermesHome: requestedHermesHome,
++        commandPath: resolvedHermesCmd,
++        apiUrl: buildPaperclipEnv(ctx.agent).PAPERCLIP_API_URL,
++        runtimeToolsEnv: buildRuntimeToolsEnv(ctx.runtimeTools),
++        wakePayloadJson: stringifyPaperclipWakePayload(ctxContext.paperclipWake) || undefined,
++        operatorAllowed,
++        serverEnv: process.env,
++    });
++    const env = finalEnv.env;
+     // ── Resolve working directory ──────────────────────────────────────────
+     const cwd = cfgString(config.cwd) || cfgString(ctx.config?.workspaceDir) || ".";
+     try {
+@@ -434,6 +439,7 @@
+     }
+     // ── Log start ──────────────────────────────────────────────────────────
+     await ctx.onLog("stdout", `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`);
++    await ctx.onLog("stdout", describeFinalEnv(finalEnv));
+     if (prevSessionId) {
+         await ctx.onLog("stdout", `[hermes] Resuming session: ${prevSessionId}\n`);
+     }
+@@ -460,9 +466,20 @@
+         }
+         return ctx.onLog(stream, chunk);
+     };
+-    const result = await runChildProcess(ctx.runId, hermesCmd, args, {
++    // Annulation : contrat « signal » du serveur (indépendant du registre de processus de ce module).
++    await ctx.onCancellationReady?.();
++    if (ctx.signal?.aborted) {
++        return {
++            exitCode: null, signal: null, timedOut: false,
++            errorCode: "cancelled", errorMessage: "Stopped before Hermes startup",
++            resultJson: { executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString(), forced: false } },
++        };
++    }
++    const result = await runChildProcess(ctx.runId, resolvedHermesCmd ?? hermesCmd, args, {
+         cwd,
+         env,
++        inheritEnv: false,
++        signal: ctx.signal,
+         timeoutSec,
+         graceSec,
+         onLog: wrappedOnLog,
+@@ -505,6 +522,13 @@
+         usage: parsed.usage || null,
+         cost_usd: parsed.costUsd ?? null,
+     };
++    if (result.cancellation?.requested) {
++        // accusé seulement si le groupe de processus a disparu ; sinon le serveur signale l'arrêt non vérifié
++        executionResult.errorCode = "cancelled";
++        executionResult.resultJson.executionCancellation = result.cancellation.processGroupGone
++            ? { state: "acknowledged", acknowledgedAt: new Date().toISOString(), forced: result.cancellation.forced }
++            : { state: "unverified", forced: result.cancellation.forced };
++    }
+     // Store session ID for next run
+     if (persistSession && parsed.sessionId) {
+         executionResult.sessionParams = { sessionId: parsed.sessionId };
+diff -ruN a/hermes-paperclip-adapter/dist/server/final-env.js b/hermes-paperclip-adapter/dist/server/final-env.js
+--- a/hermes-paperclip-adapter/dist/server/final-env.js	1970-01-01 01:00:00.000000000 +0100
++++ b/hermes-paperclip-adapter/dist/server/final-env.js	2026-10-01 02:00:00.000000000 +0200
+@@ -0,0 +1,196 @@
++// Environnement FINAL d'un run Hermes lancé par Paperclip : construit par liste blanche, jamais hérité.
++// Prototype du lot C (chantier de nuit du 07/10/2026). Partagé par les deux voies :
++//  - voie 1 : copié tel quel dans le correctif de @paperclipai/hermes-paperclip-adapter (dist/server/final-env.js) ;
++//  - voie 2 : importé par la copie d'execute de l'adaptateur Hermes Control.
++// Liste blanche reprise de la recherche de Codex (07/10, §2 « Liste d'autorisation proposée, Linux / Hermes 0.21 »).
++//
++// Règles :
++//  - rien de process.env n'est recopié tel quel ; seules quelques valeurs NON secrètes du compte d'exécution sont
++//    recalculées depuis la base des comptes (HOME, USER, LOGNAME : os.userInfo(), jamais $HOME ; refus si la résolution
++//    échoue) et l'URL de l'API vient de la configuration du serveur ;
++//  - identité Paperclip (agent, société, run, clé) : uniquement depuis le contexte du run (ctx), jamais depuis config.env ;
++//  - config.env (réglages de l'agent + liaisons de secrets résolues par le serveur) : seulement les noms admis
++//    (liste fixe + liste de l'opérateur), jamais un nom interdit, jamais une valeur égale à un secret de contrôle du serveur ;
++//  - dossiers temporaires : recalculés depuis ctx.context.paperclipScratch (posé par le serveur), vérifiés.
++import fs from "node:fs";
++import os from "node:os";
++import path from "node:path";
++
++export const SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin";
++
++/** Noms que config.env peut fournir (valeurs administrées par l'opérateur ou réglage non secret). */
++export const CONFIG_ENV_ALLOWED = Object.freeze([
++  "TZ", "LANG", "LC_ALL", "NO_COLOR",
++  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
++  "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
++]);
++
++/** Construits par l'adaptateur depuis des sources de confiance : config.env ne peut PAS les fournir. */
++export const RUN_OWNED = Object.freeze([
++  "HOME", "USER", "LOGNAME", "PATH", "HERMES_HOME", "PYTHONUNBUFFERED",
++  "TMPDIR", "TMP", "TEMP",
++  "PAPERCLIP_AGENT_ID", "PAPERCLIP_COMPANY_ID", "PAPERCLIP_API_URL", "PAPERCLIP_RUN_ID", "PAPERCLIP_API_KEY",
++  "PAPERCLIP_TASK_ID", "PAPERCLIP_WAKE_REASON", "PAPERCLIP_WAKE_COMMENT_ID", "PAPERCLIP_WAKE_PAYLOAD_JSON",
++  "PAPERCLIP_RUN_SCRATCH_DIR", "PAPERCLIP_TASK_SCRATCH_DIR", "PAPERCLIP_SCRATCH_DIR", "PAPERCLIP_TMPDIR",
++]);
++
++/** Interdits même si l'opérateur les ajoute à sa liste (contrôle du serveur, détournement d'exécution, sockets). */
++const DENY_EXACT = new Set([
++  "BETTER_AUTH_SECRET", "DATABASE_URL", "PGPASSWORD", "PGUSER", "PGHOST", "PGDATABASE", "PGPORT",
++  "BASH_ENV", "ENV", "NODE_OPTIONS", "VIRTUAL_ENV",
++  "SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR",
++  "NPM_TOKEN", "NODE_AUTH_TOKEN", "GITHUB_TOKEN", "GH_TOKEN",
++]);
++const DENY_PREFIX = ["PAPERCLIP_", "PAPERCLIPAI_", "LD_", "PYTHON", "HERMES_", "DYLD_", "INFISICAL_", "VAULT_"];
++
++/** Secrets de contrôle du serveur : leurs VALEURS ne doivent jamais réapparaître sous un autre nom. */
++const SERVER_CONTROL_SECRET_NAMES = [
++  "PAPERCLIP_AGENT_JWT_SECRET", "PAPERCLIP_TOOL_ACTION_SIGNING_SECRET", "PAPERCLIP_SECRETS_MASTER_KEY",
++  "PAPERCLIP_WORKSPACE_HANDOFF_SECRET", "BETTER_AUTH_SECRET", "DATABASE_URL",
++];
++
++/** Chemin absolu d'une commande : absolue telle quelle, sinon cherchée dans searchPath (LECTURE du PATH du serveur, jamais transmis). */
++export function resolveCommandAbsolute(command, searchPath) {
++  if (typeof command !== "string" || !command) return undefined;
++  const ok = (p) => { try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).isFile(); } catch { return false; } };
++  if (command.includes("/")) return path.isAbsolute(command) && ok(command) ? command : undefined;
++  for (const dir of String(searchPath ?? "").split(":").filter((d) => path.isAbsolute(d))) {
++    const candidate = path.join(dir, command);
++    if (ok(candidate)) return candidate;
++  }
++  return undefined;
++}
++
++export function isDenied(name) {
++  return DENY_EXACT.has(name) || DENY_PREFIX.some((p) => name.startsWith(p));
++}
++
++function str(v) {
++  return typeof v === "string" && v.length > 0 ? v : undefined;
++}
++
++/** Dossier temporaire du run posé par le serveur (services/run-scratch.js) : sous os.tmpdir(), nom « paperclip-run-* ». */
++export function trustedScratchDir(ctx) {
++  const s = ctx?.context?.paperclipScratch;
++  const dir = s && typeof s === "object" ? str(s.dir) : undefined;
++  if (!dir || !path.isAbsolute(dir)) return undefined;
++  const tmpRoot = path.resolve(os.tmpdir());
++  const resolved = path.resolve(dir);
++  if (path.dirname(resolved) !== tmpRoot) return undefined;
++  if (!path.basename(resolved).startsWith("paperclip-run-")) return undefined;
++  return resolved;
++}
++
++/**
++ * Compte d'exécution selon la base des comptes (getpwuid via os.userInfo()) : dossier personnel non vide et ABSOLU, nom non
++ * vide. Lève une erreur si la résolution échoue ou si le résultat est invalide : aucun repli vers os.homedir() ni $HOME
++ * (correction 0.6.3 : un HOME hérité du serveur ne doit pas orienter le processus fils).
++ * @returns {{ home: string, username: string, uid: number }}
++ */
++export function accountIdentity() {
++  let user;
++  try {
++    user = os.userInfo();
++  } catch (e) {
++    throw new Error(`env-final : compte d'exécution introuvable dans la base des comptes (getpwuid : ${e && e.code ? e.code : e}) ; refus, aucun repli vers $HOME`);
++  }
++  const home = user && user.homedir;
++  if (typeof home !== "string" || home.length === 0 || !path.isAbsolute(home)) {
++    throw new Error(`env-final : dossier personnel du compte invalide (${JSON.stringify(home)} : vide ou non absolu) ; refus, aucun repli vers $HOME`);
++  }
++  if (typeof user.username !== "string" || user.username.length === 0) {
++    throw new Error("env-final : nom du compte d'exécution vide ; refus");
++  }
++  return { home, username: user.username, uid: user.uid };
++}
++
++/**
++ * @param {object} input
++ * @param {object} input.ctx                 contexte d'exécution Paperclip (AdapterExecutionContext)
++ * @param {Record<string,unknown>} [input.configEnv]  config.env tel que reçu (déjà résolu par le serveur)
++ * @param {string} [input.hermesHome]        HERMES_HOME décidé par l'appelant (voie 2 : profil affecté ; voie 1 : config.env vérifié)
++ * @param {string} [input.commandPath]       chemin absolu du binaire Hermes (son dossier est mis en tête du PATH)
++ * @param {string} input.apiUrl              URL de l'API (configuration du serveur, buildPaperclipEnv)
++ * @param {Record<string,string>} [input.runtimeToolsEnv]  sortie de buildRuntimeToolsEnv(ctx.runtimeTools)
++ * @param {string[]} [input.operatorAllowed] noms supplémentaires admis depuis config.env (liaisons de secrets voulues)
++ * @param {Record<string,string|undefined>} [input.serverEnv]  environnement du serveur, LU seulement pour comparer les valeurs
++ * @returns {{ env: Record<string,string>, rejected: {name:string, reason:string}[], sources: Record<string,string> }}
++ */
++export function buildFinalEnv(input) {
++  const { ctx } = input;
++  const env = {};
++  const sources = {};
++  const rejected = [];
++  const set = (name, value, source) => {
++    if (typeof value !== "string" || value.length === 0) return;
++    env[name] = value;
++    sources[name] = source;
++  };
++
++  // 1. Compte d'exécution et emplacements : HOME, USER, LOGNAME viennent de la base des comptes (getpwuid), JAMAIS de
++  //    $HOME ni d'os.homedir() (qui lit $HOME) ; échec de résolution → refus (exception), aucun repli.
++  const account = accountIdentity();
++  set("HOME", account.home, "compte");
++  set("USER", account.username, "compte");
++  set("LOGNAME", account.username, "compte");
++  const binDir = input.commandPath && path.isAbsolute(input.commandPath) ? path.dirname(input.commandPath) : undefined;
++  set("PATH", binDir ? `${binDir}:${SYSTEM_PATH}` : SYSTEM_PATH, "fixe");
++  set("LANG", "C.UTF-8", "fixe");
++  set("PYTHONUNBUFFERED", "1", "fixe");
++  if (input.hermesHome) set("HERMES_HOME", input.hermesHome, "adaptateur");
++
++  // 2. Temporaires du run (source : le serveur, via le contexte)
++  const scratch = trustedScratchDir(ctx);
++  if (scratch) {
++    for (const k of ["PAPERCLIP_RUN_SCRATCH_DIR", "PAPERCLIP_TASK_SCRATCH_DIR", "PAPERCLIP_SCRATCH_DIR", "PAPERCLIP_TMPDIR", "TMPDIR", "TMP", "TEMP"]) set(k, scratch, "ctx.context.paperclipScratch");
++  }
++
++  // 3. Identité Paperclip : uniquement le contexte du run
++  set("PAPERCLIP_AGENT_ID", str(ctx.agent?.id), "ctx.agent");
++  set("PAPERCLIP_COMPANY_ID", str(ctx.agent?.companyId), "ctx.agent");
++  set("PAPERCLIP_RUN_ID", str(ctx.runId), "ctx.runId");
++  set("PAPERCLIP_API_KEY", str(ctx.authToken), "ctx.authToken");
++  set("PAPERCLIP_API_URL", str(input.apiUrl), "configuration serveur");
++
++  // 4. Réveil et tâche (mêmes règles de lecture que l'adaptateur officiel)
++  const c = ctx.context || {};
++  set("PAPERCLIP_TASK_ID", str(c.taskId) || str(c.issueId) || str(ctx.config?.taskId), "ctx.context");
++  set("PAPERCLIP_WAKE_REASON", str(c.wakeReason) || str(ctx.config?.wakeReason), "ctx.context");
++  set("PAPERCLIP_WAKE_COMMENT_ID", str(c.commentId) || str(c.wakeCommentId) || str(ctx.config?.commentId), "ctx.context");
++  if (input.wakePayloadJson) set("PAPERCLIP_WAKE_PAYLOAD_JSON", input.wakePayloadJson, "ctx.context");
++
++  // 5. Outils du run
++  for (const [k, v] of Object.entries(input.runtimeToolsEnv ?? {})) {
++    if (k.startsWith("PAPERCLIP_RUNTIME_TOOLS_")) set(k, v, "ctx.runtimeTools");
++  }
++
++  // 6. config.env : seulement les noms admis, jamais un nom interdit ni une valeur de secret serveur
++  const allowed = new Set([...CONFIG_ENV_ALLOWED, ...(input.operatorAllowed ?? []).filter((n) => !isDenied(n))]);
++  const protectedValues = new Set();
++  for (const n of SERVER_CONTROL_SECRET_NAMES) {
++    const v = input.serverEnv?.[n];
++    if (typeof v === "string" && v.length >= 8) protectedValues.add(v);
++  }
++  const ce = input.configEnv && typeof input.configEnv === "object" ? input.configEnv : {};
++  for (const [name, value] of Object.entries(ce)) {
++    if (RUN_OWNED.includes(name)) {
++      // une valeur identique à celle construite n'est pas un rejet (ex. temporaires posés par le serveur)
++      if (env[name] !== undefined && env[name] === value) continue;
++      rejected.push({ name, reason: "construit par l'adaptateur (source non autorisée)" });
++      continue;
++    }
++    if (isDenied(name)) { rejected.push({ name, reason: "nom interdit" }); continue; }
++    if (!allowed.has(name)) { rejected.push({ name, reason: "hors liste blanche" }); continue; }
++    if (typeof value !== "string") { rejected.push({ name, reason: "valeur non textuelle" }); continue; }
++    if (protectedValues.has(value)) { rejected.push({ name, reason: "valeur d'un secret de contrôle du serveur" }); continue; }
++    set(name, value, "config.env (admis)");
++  }
++  return { env, rejected, sources };
++}
++
++/** Résumé sans valeurs, pour le journal du run. */
++export function describeFinalEnv(result) {
++  const names = Object.keys(result.env).sort();
++  const rej = result.rejected.map((r) => `${r.name} (${r.reason})`);
++  return `[env-final] ${names.length} variable(s) : ${names.join(", ")}${rej.length ? ` · refusées depuis config.env : ${rej.join(", ")}` : ""}\n`;
++}
+diff -ruN a/hermes-paperclip-adapter/dist/server/index.js b/hermes-paperclip-adapter/dist/server/index.js
+--- a/hermes-paperclip-adapter/dist/server/index.js	2026-10-01 02:00:00.000000000 +0200
++++ b/hermes-paperclip-adapter/dist/server/index.js	2026-10-01 02:00:00.000000000 +0200
+@@ -2,6 +2,7 @@
+  * Server-side adapter module exports.
+  */
+ export { execute } from "./execute.js";
++export { HERMES_FINAL_ENV_PATCH, HERMES_FINAL_ENV_ADAPTER_UTILS } from "./execute.js";
+ export { testEnvironment } from "./test.js";
+ export { detectModel, parseModelFromConfig, resolveProvider, inferProviderFromModel } from "./detect-model.js";
+ export { getConfigSchema } from "./config-schema.js";

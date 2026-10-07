@@ -104,7 +104,8 @@ export async function assertGatewayFree(home: string, knownProfiles: string[]): 
 /** Installe et démarre la passerelle Hermes de ce profil (service utilisateur), sans shell. */
 export async function startGateway(home: string, binary: HermesBin): Promise<string> {
   try {
-    return await hermes(home, ["gateway", "install", "--start-now", "--start-on-login"], binary, 120_000);
+    // opération d'ADMINISTRATION du service utilisateur : seule à recevoir XDG_RUNTIME_DIR / DBUS (admin-env.ts)
+    return await hermes(home, ["gateway", "install", "--start-now", "--start-on-login"], binary, 120_000, "gateway_service");
   } catch (e) {
     const err = e as { stdout?: string; stderr?: string; message?: string };
     throw new Error(`hermes gateway install : ${(err.stderr || err.stdout || err.message || "").trim().slice(-400)}`);

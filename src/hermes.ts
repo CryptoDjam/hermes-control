@@ -8,6 +8,8 @@ import { constants as fsConstants } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import YAML from "yaml";
 import { accountHome } from "./paths.js";
+import { type HermesCallOperation, accountEnv, fixedPath, localeEnv, needsServiceManager, systemctlUserEnv, trustedSystemctl, userServiceManagerEnv } from "./admin-env.js";
+export type { HermesCallOperation } from "./admin-env.js";
 
 const run = promisify(execFile);
 
@@ -84,24 +86,27 @@ export function toExec(bin: HermesBin): HermesExec | null {
   return bin;
 }
 
-/** Environnement EXPLICITE d'un appel Hermes du plugin : rien n'est hérité au-delà de PATH (après le dossier de l'interpréteur) et de la langue. */
-export function hermesCallEnv(home: string, exec: HermesExec): Record<string, string> {
-  const path: string[] = [];
-  for (const d of [...exec.pathPrefix, ...(process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin").split(":")]) if (d && isAbsolute(d) && !path.includes(d)) path.push(d);
-  const env: Record<string, string> = { PATH: path.join(":"), HOME: accountHome(), HERMES_HOME: home, PYTHONUNBUFFERED: "1", NO_COLOR: "1" };
-  for (const k of ["LANG", "LC_ALL", "TZ", "USER", "LOGNAME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) {
-    const v = process.env[k];
-    if (v) env[k] = v;
-  }
+/**
+ * Environnement EXPLICITE d'un appel Hermes du plugin (0.6.3, voir admin-env.ts) : PATH fixé (interpréteur administré +
+ * chemin système), HOME/USER/LOGNAME du compte (getpwuid), langue/fuseau contrôlés. XDG_RUNTIME_DIR et
+ * DBUS_SESSION_BUS_ADDRESS : seulement pour une opération d'administration du service (`gateway_service`), dérivés de
+ * l'uid du compte ; jamais repris de l'environnement du serveur.
+ */
+export function hermesCallEnv(home: string, exec: HermesExec, op: HermesCallOperation = "query"): Record<string, string> {
+  const env: Record<string, string> = { PATH: fixedPath(exec.pathPrefix), ...accountEnv(), HERMES_HOME: home, PYTHONUNBUFFERED: "1", NO_COLOR: "1", ...localeEnv() };
+  if (needsServiceManager(op)) Object.assign(env, userServiceManagerEnv());
   return env;
 }
 
-/** Exécute `<binaire administré> <args>` pour un HERMES_HOME donné (jamais via un shell, jamais un nom cherché dans le PATH). */
-export async function hermes(home: string, args: string[], binary: HermesBin, timeoutMs = 20_000): Promise<string> {
+/**
+ * Exécute `<binaire administré> <args>` pour un HERMES_HOME donné (jamais via un shell, jamais un nom cherché dans le PATH).
+ * `op` : constante du code appelant (jamais un paramètre d'action) ; seule `gateway_service` reçoit le bus utilisateur.
+ */
+export async function hermes(home: string, args: string[], binary: HermesBin, timeoutMs = 20_000, op: HermesCallOperation = "query"): Promise<string> {
   const exec = toExec(binary);
   if (!exec) throw new Error(`aucun binaire Hermes administré (chemin absolu vérifié) : appel « hermes ${args.slice(0, 2).join(" ")} » refusé`);
   const { stdout } = await run(exec.path, args, {
-    env: hermesCallEnv(home, exec),
+    env: hermesCallEnv(home, exec, op),
     timeout: timeoutMs,
     maxBuffer: 4 * 1024 * 1024,
   });
@@ -396,9 +401,13 @@ export async function doctor(home: string, binary: HermesBin): Promise<string> {
   }
 }
 
-/** Redémarre l'unité systemd utilisateur du tableau de bord d'une instance, si elle existe. */
+/**
+ * Redémarre l'unité systemd utilisateur du tableau de bord d'une instance, si elle existe. 0.6.3 : `systemctl` de
+ * CONFIANCE (chemin système fixe, root, non modifiable par d'autres) et environnement MINIMAL propre (PATH système,
+ * compte, bus utilisateur dérivé de l'uid) — jamais l'environnement du serveur ni un `systemctl` trouvé dans son PATH.
+ */
 export async function restartDashboard(instance: string): Promise<string> {
   const unit = `hermes-dashboard-${assertSafeName(instance)}.service`;
-  const { stdout, stderr } = await run("systemctl", ["--user", "restart", unit], { timeout: 30_000 });
+  const { stdout, stderr } = await run(trustedSystemctl(), ["--user", "restart", unit], { timeout: 30_000, env: systemctlUserEnv() });
   return (stdout + stderr).trim() || `${unit} redémarré`;
 }

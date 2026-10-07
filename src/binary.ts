@@ -57,7 +57,7 @@ let unmappedUid: number | null | undefined;
  * Dans un espace de noms utilisateur (bwrap, conteneur sans root), les fichiers de root apparaissent sous l'uid de
  * débordement (overflowuid, 65534) : on le traite comme root, et SEULEMENT dans ce cas (sur l'hôte, 65534 = nobody : refusé).
  */
-async function overflowUidIfNamespaced(): Promise<number | null> {
+export async function overflowUidIfNamespaced(): Promise<number | null> {
   if (unmappedUid !== undefined) return unmappedUid;
   try {
     const map = (await readFile("/proc/self/uid_map", "utf8")).trim().split(/\s+/);

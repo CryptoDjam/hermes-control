@@ -1,0 +1,162 @@
+diff -ruN a/adapter-utils/dist/server-utils.d.ts b/adapter-utils/dist/server-utils.d.ts
+--- a/adapter-utils/dist/server-utils.d.ts	2026-10-01 02:00:00.000000000 +0200
++++ b/adapter-utils/dist/server-utils.d.ts	2026-10-01 02:00:00.000000000 +0200
+@@ -16,6 +16,12 @@
+     durationMs?: number | null;
+     errorCode?: string | null;
+     terminalResultCleanup?: TerminalResultCleanupEvidence | null;
++    /** Présent quand opts.signal a été déclenché pendant l'exécution. */
++    cancellation?: {
++        requested: true;
++        forced: boolean;
++        processGroupGone: boolean;
++    } | null;
+ }
+ export interface TerminalResultCleanupOptions {
+     hasTerminalResult: (output: {
+@@ -612,6 +618,10 @@
+     stdin?: string;
+     remoteExecution?: RemoteExecutionSpec | null;
+     localProcessSandbox?: LocalProcessSandboxOptions | null;
++    /** false : `env` est l'environnement final du processus (pas de fusion avec process.env). Défaut : true. */
++    inheritEnv?: boolean;
++    /** Annulation du run : SIGTERM au groupe, SIGKILL après graceSec, vérification du groupe à la fermeture. */
++    signal?: AbortSignal;
+ }): Promise<RunProcessResult>;
+ export {};
+ //# sourceMappingURL=server-utils.d.ts.map
+\ No newline at end of file
+diff -ruN a/adapter-utils/dist/server-utils.js b/adapter-utils/dist/server-utils.js
+--- a/adapter-utils/dist/server-utils.js	2026-10-01 02:00:00.000000000 +0200
++++ b/adapter-utils/dist/server-utils.js	2026-10-01 02:00:00.000000000 +0200
+@@ -3026,14 +3026,21 @@
+     }
+     throw new Error(`Command not found in PATH: "${command}"`);
+ }
++/** Marqueur du correctif local « voie 1 » (Hermes Control 0.6.3) : inheritEnv:false + annulation par signal. */
++export const RUN_CHILD_PROCESS_FINAL_ENV_PATCH = "hermes-control-voie1/adapter-utils@2026.1001.0/2";
+ export async function runChildProcess(runId, command, args, opts) {
+     const onLogError = opts.onLogError ??
+         ((err, id, msg) => console.warn({ err, runId: id }, msg));
++    // inheritEnv === false : opts.env est l'environnement FINAL (aucune réinjection de process.env).
++    // Défaut inchangé (true) pour les adaptateurs existants.
++    const inheritEnv = opts.inheritEnv !== false;
+     return new Promise((resolve, reject) => {
+-        const rawMerged = {
+-            ...sanitizeInheritedPaperclipEnv(process.env),
+-            ...opts.env,
+-        };
++        const rawMerged = inheritEnv
++            ? {
++                ...sanitizeInheritedPaperclipEnv(process.env),
++                ...opts.env,
++            }
++            : { ...opts.env };
+         // Strip Claude Code nesting-guard env vars so spawned `claude` processes
+         // don't refuse to start with "cannot be launched inside another session".
+         // These vars leak in when the Paperclip server itself is started from
+@@ -3084,6 +3091,66 @@
+                 graceSec: opts.graceSec,
+                 processGroupId,
+             });
++            // Annulation par le signal du run (contrat onCancellationReady/signal du serveur) : ne dépend pas
++            // du registre runningProcesses de CETTE copie du module (un adaptateur externe a sa propre copie).
++            let cancelRequested = false;
++            let cancelForced = false;
++            let cancelKillTimer = null;
++            const onAbort = () => {
++                if (cancelRequested)
++                    return;
++                cancelRequested = true;
++                signalRunningProcess({ child, processGroupId }, "SIGTERM");
++                cancelKillTimer = setTimeout(() => {
++                    cancelKillTimer = null;
++                    cancelForced = true;
++                    signalRunningProcess({ child, processGroupId }, "SIGKILL");
++                }, Math.max(1, opts.graceSec) * 1000);
++            };
++            if (opts.signal) {
++                if (opts.signal.aborted)
++                    onAbort();
++                else
++                    opts.signal.addEventListener("abort", onAbort, { once: true });
++            }
++            const settleCancellation = async () => {
++                opts.signal?.removeEventListener("abort", onAbort);
++                if (cancelKillTimer)
++                    clearTimeout(cancelKillTimer);
++                cancelKillTimer = null;
++                if (!cancelRequested)
++                    return null;
++                // l'enfant direct est fermé ; ses descendants du même groupe doivent l'être aussi
++                let groupAlive = false;
++                if (processGroupId && process.platform !== "win32") {
++                    try {
++                        process.kill(-processGroupId, 0);
++                        groupAlive = true;
++                    }
++                    catch {
++                        groupAlive = false;
++                    }
++                    if (groupAlive) {
++                        cancelForced = true;
++                        try {
++                            process.kill(-processGroupId, "SIGKILL");
++                        }
++                        catch { }
++                        // un membre tué reste visible (zombie) jusqu'à ce que son parent le ramasse : attente bornée (3 s)
++                        for (let i = 0; i < 60 && groupAlive; i++) {
++                            await new Promise((r) => setTimeout(r, 50));
++                            try {
++                                process.kill(-processGroupId, 0);
++                                groupAlive = true;
++                            }
++                            catch {
++                                groupAlive = false;
++                            }
++                        }
++                    }
++                }
++                return { requested: true, forced: cancelForced, processGroupGone: !groupAlive };
++            };
+             let timedOut = false;
+             let stdout = "";
+             let stderr = "";
+@@ -3205,6 +3272,7 @@
+                 if (timeout)
+                     clearTimeout(timeout);
+                 clearTerminalCleanupTimers();
++                void settleCancellation();
+                 runningProcesses.delete(runId);
+                 void target.cleanup?.();
+                 const errno = err.code;
+@@ -3221,9 +3289,11 @@
+                 if (timeout)
+                     clearTimeout(timeout);
+                 clearTerminalCleanupTimers();
++                const cancellationPromise = settleCancellation();
+                 runningProcesses.delete(runId);
+                 void logChain.finally(() => {
+-                    void Promise.resolve()
++                    void cancellationPromise
++                        .then((cancellation) => Promise.resolve()
+                         .then(() => target.cleanup?.())
+                         .finally(() => {
+                         resolve({
+@@ -3234,6 +3304,7 @@
+                             stderr,
+                             pid: child.pid ?? null,
+                             startedAt,
++                            cancellation,
+                             terminalResultCleanup: terminalCleanupStarted
+                                 ? {
+                                     kind: "terminal_result_cleanup",
+@@ -3246,7 +3317,7 @@
+                                 }
+                                 : null,
+                         });
+-                    });
++                    }));
+                 });
+             });
+         })

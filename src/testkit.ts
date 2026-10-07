@@ -32,7 +32,7 @@ export async function makeFakeHermes(dir: string, name = "hermes"): Promise<stri
 import os, sys, json, shutil
 home = os.environ.get("HERMES_HOME", "")
 here = os.path.dirname(os.path.abspath(__file__))
-keep = ("HERMES", "PYTHON", "LD_", "PAPERCLIP_AGENT", "CUSTOM_", "VIRTUAL_ENV", "BASH_ENV")
+keep = ("HERMES", "PYTHON", "LD_", "PAPERCLIP_AGENT", "CUSTOM_", "VIRTUAL_ENV", "BASH_ENV", "HOME", "USER", "LOGNAME", "XDG_", "DBUS_")
 with open(os.path.join(here, "calls.jsonl"), "a") as f:
     f.write(json.dumps({"exe": os.path.abspath(__file__), "argv": sys.argv[1:], "HERMES_HOME": home, "PATH": os.environ.get("PATH", ""), "env": {k: v for k, v in os.environ.items() if k.startswith(keep)}}) + "\\n")
 a = sys.argv[1:]

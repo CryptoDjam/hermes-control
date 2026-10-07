@@ -4,3 +4,4 @@ dist/
 *.map
 adapter/node_modules/
 adapter/dist/
+adapter/voie1/paquets/*.tgz
