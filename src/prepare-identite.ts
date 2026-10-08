@@ -2,7 +2,8 @@
 // résolue dans <ws>/donnees/identites.json (écrite par le pack seul) — jamais d'un nom ni d'un paramètre libre.
 //   profil  : <ws>/donnees/h/<i>/profiles/<a>     (instance créée par le pack ; HC n'en crée pas)
 //   données : <ws>/donnees/e/<e>/a/<a>            (propriétaire enregistré à la création, voir proprietaire.ts)
-// Refus (rien n'est créé) : projection invalide, alias absent, entreprise incohérente, agent retiré ou non affecté,
+// Refus (rien n'est créé) : projection invalide ou périmée, alias absent, entreprise incohérente, identité inactive
+// (entreprise ou agent absent/retiré : préservé, ne tourne pas), agent non affecté,
 // instance absente ou hors des racines, lien sur le chemin des données, dossier d'une autre identité, budget T16 dépassé
 // sur le HERMES_HOME littéral (racine d'exécution administrée comprise).
 import { lstat, mkdir, realpath } from "node:fs/promises";
@@ -10,7 +11,8 @@ import { dirname, join } from "node:path";
 import { type AssignmentsTable, canonicalInstance, executionOf, knownRoots, readAssignments } from "./assignments.js";
 import { budgetSockets } from "./health.js";
 import type { HermesBin } from "./hermes.js";
-import { type Identity, readIdentites, resolveIdentity } from "./identites.js";
+import { type Identity, resolveIdentity } from "./identites.js";
+import { readCurrentIdentites } from "./identites-fraicheur.js";
 import { type PrepareResult, prepareAgent } from "./prepare.js";
 import type { Workspace } from "./workspace.js";
 
@@ -25,7 +27,7 @@ export interface PrepareByIdentityInput {
 }
 
 export async function prepareByIdentity(input: PrepareByIdentityInput): Promise<PrepareResult & { identity: Identity; executionHome: string }> {
-  const { projection, error } = await readIdentites(input.ws);
+  const { projection, error } = await readCurrentIdentites(input.ws);
   if (!projection) throw new Error(`préparation refusée : ${error} ; rien n'est préparé`);
   const r = resolveIdentity(input.ws, projection, { companyId: input.companyId, agentId: input.agentId });
   if (!r.ok) throw new Error(`préparation refusée : ${r.reason}`);

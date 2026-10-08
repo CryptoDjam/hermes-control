@@ -28,6 +28,7 @@ import { type HermesInstance, readModelCatalogs } from "../../src/hermes.js";
 import { agentsMapError } from "../../src/agents-map.js";
 import { assignmentsFile, hermesSpecFor, readAssignments, resolveAssignment } from "../../src/assignments.js";
 import { describeBinary, verifyHermesBinary } from "../../src/binary.js";
+import { INACTIVE } from "../../src/identites.js";
 import { ADMINISTERED_ENV, type ExecutionPlan, HermesControlRefusal, NEUTRALIZED_ENV, buildAgentEnv, checkExtraArgs, planExecution } from "../../src/execution.js";
 import { slug } from "../../src/match.js";
 import { describeReference, referenceInfo } from "../../src/reference.js";
@@ -281,10 +282,14 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
   };
 
   /** Profil Hermes d'un agent connu seulement par son id (listSkills / syncSkills) : table des affectations explicites. */
-  async function profileOf(agentId: string, companyId: string | null | undefined): Promise<{ home: string; label: string } | null> {
+  // lot B : une identité inactive (entreprise ou agent absent/retiré dans la projection) ne reçoit aucun lien de skills ;
+  // l'avertissement donne la vraie raison (et non « pas affecté »)
+  async function profileOf(agentId: string, companyId: string | null | undefined): Promise<{ home: string; label: string } | { inactive: string } | null> {
     const r = await resolveAssignment(agentId, { companyId: companyId ?? null });
-    return r.ok ? { home: r.ok.home, label: `${r.ok.instanceHome.split("/").pop()}/${r.ok.profile}` } : null;
+    if (!r.ok) return r.reason.startsWith(INACTIVE) ? { inactive: r.reason } : null;
+    return { home: r.ok.home, label: `${r.ok.instanceHome.split("/").pop()}/${r.ok.profile}` };
   }
+  const inactiveWarning = (p: { inactive: string }) => `Hermes Control : ${p.inactive} ; aucun lien de skills n'est posé.`;
   const UNKNOWN_PROFILE = "Hermes Control : profil Hermes inconnu tant que l'agent n'est pas affecté explicitement (page Hermes → « Affecter » ou « Préparer l'agent ») ; les liens de skills seront posés dans son profil au prochain passage.";
 
   // 0.6.2 : profil résolu D'ABORD ; ni lecture ni écriture du dossier global (`$HOME/.hermes/skills`) — l'officiel n'est
@@ -293,6 +298,7 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
     const p = await profileOf(ctx.agentId, (ctx as { companyId?: string | null }).companyId);
     const snap = await managedSnapshot(ctx.config as AnyRecord);
     if (!p) return { ...snap, warnings: [...snap.warnings, UNKNOWN_PROFILE] };
+    if ("inactive" in p) return { ...snap, warnings: [...snap.warnings, inactiveWarning(p)] };
     return snapshotForProfile(snap, p.home, p.label);
   };
 
@@ -301,6 +307,10 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
     if (!p) {
       const snap = await managedSnapshot(ctx.config as AnyRecord, desired);
       return { ...snap, warnings: [...snap.warnings, `${UNKNOWN_PROFILE} Aucun lien n'a été posé.`] };
+    }
+    if ("inactive" in p) {
+      const snap = await managedSnapshot(ctx.config as AnyRecord, desired);
+      return { ...snap, warnings: [...snap.warnings, inactiveWarning(p)] };
     }
     // refus (dossier des skills hors du profil) : instantané avec l'avertissement, AUCUNE écriture (pas d'exception : le
     // serveur la rendrait en « Internal server error » sans le motif)

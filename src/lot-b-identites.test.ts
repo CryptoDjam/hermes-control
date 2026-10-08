@@ -187,12 +187,15 @@ describe("cible : HC consomme la projection d'alias (identites.json du pack)", (
     await expect(prepareByIdentity({ ws, companyId: CA, agentId: AG(7), binaryFor })).rejects.toThrow(/alias absent/);
     await expect(prepareByIdentity({ ws, companyId: CA, agentId: AG(2), binaryFor })).rejects.toThrow(/incohérence d'entreprise/);
     delete p.agents[1]!["instanceAlias"];
+    p.revision += 1; // le pack fait avancer la révision à chaque écriture (HC refuse une même révision au contenu différent)
     await writeFile(identitesFile(ws), JSON.stringify(p));
     await expect(prepareByIdentity({ ws, companyId: CB, agentId: AG(2), binaryFor })).rejects.toThrow(/sans affectation explicite/);
     p.agents[1]!["statut"] = "retire";
+    p.revision += 1;
     await writeFile(identitesFile(ws), JSON.stringify(p));
-    await expect(prepareByIdentity({ ws, companyId: CB, agentId: AG(2), binaryFor })).rejects.toThrow(/retiré/);
+    await expect(prepareByIdentity({ ws, companyId: CB, agentId: AG(2), binaryFor })).rejects.toThrow(/identité inactive.*retiré/);
     p.agents[1]!["profileAlias"] = "a00001"; // alias attribué à deux agents
+    p.revision += 1;
     await writeFile(identitesFile(ws), JSON.stringify(p));
     await expect(prepareByIdentity({ ws, companyId: CA, agentId: AG(1), binaryFor })).rejects.toThrow(/projection .* invalide.*a00001 attribué à deux agents/);
     await writeFile(identitesFile(ws), "{ tronqué");
@@ -235,6 +238,7 @@ describe("cible : HC consomme la projection d'alias (identites.json du pack)", (
     const { ws, p } = await projectionFixture();
     for (let k = 3; k <= 8; k++) p.agents.push({ agentId: AG(k), companyAlias: "e00001", profileAlias: `a0000${k}`, name: "Chef", statut: "actif", vuLe: null, instanceAlias: "i00001" });
     (p as unknown as { compteurs: { a: number } }).compteurs.a = 8;
+    p.revision += 1;
     await writeFile(identitesFile(ws), JSON.stringify(p));
     const res = await Promise.all([3, 4, 5, 6, 7, 8].map((k) => prepareByIdentity({ ws, companyId: CA, agentId: AG(k), binaryFor })));
     expect(new Set(res.map((r) => r.agentDir)).size).toBe(6);
