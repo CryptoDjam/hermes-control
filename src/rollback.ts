@@ -189,6 +189,7 @@ export async function planRollback(opts: { exportData?: unknown; now?: Date; max
   const commands = [
     "# à lancer par l'administrateur, MUTATIONS ARRÊTÉES (pas de création/renommage d'agent, pas d'action du plugin) entre l'export et la réinstallation ; à vérifier en recette (rien n'est installé par ce script)",
     "paperclipai plugin uninstall hermes-control        # sans --force : l'état du plugin est conservé",
+    "# depuis 0.7.0, les paquets s'appellent @cyberservices-ai/paperclip-{plugin,adapter}-hermes-control ; la 0.5.0 n'existe que sous les anciens noms ci-dessous (même id de plugin hermes-control, même type hermes_local : l'enregistrement est remplacé, voir docs/migration-0.7.0.md)",
     "paperclipai plugin install paperclip-plugin-hermes-control@0.5.0",
     `paperclipai adapter install --payload-json '{"packageName":"paperclip-adapter-hermes-control","version":"0.5.0"}'`,
     "# les agents doivent retrouver leur hermesCommand d'avant (lanceurs) : la 0.6.x ne les modifie pas ; s'ils ont été retirés, les remettre",

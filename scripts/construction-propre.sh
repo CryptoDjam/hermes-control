@@ -4,7 +4,8 @@
 #   archives d'origine de voie1 obtenues en version exacte et vérifiées (sha512 de origine/INTEGRITE-*) ;
 #   adapter/voie1/fabriquer.sh rejoué (correctifs reconstruits, identiques aux archives versionnées) ;
 #   npm ci (racine + adapter/), build, tsc, tests racine + adapter/, lot-063 OBLIGATOIRE (jamais sauté) ;
-#   archives livrables (npm pack) et leurs SHA-256 ; bilan écrit dans le dossier de sortie.
+#   archives livrables (npm pack) et leurs SHA-256 ; installation et import des deux archives depuis un HOME et un cache
+#   npm vierges (scripts/verifier-installation.sh, en ligne seulement) ; bilan écrit dans le dossier de sortie.
 # S'arrête au PREMIER contrôle en erreur, code ≠ 0. Aucune erreur masquée : chaque étape tourne dans un
 # sous-shell `set -euo pipefail` hors de tout contexte conditionnel, sa sortie va dans un journal (pas de pipe).
 #
@@ -15,7 +16,8 @@
 #                        doivent y être ; les archives d'origine y sont vérifiées par leur sha512 comme en ligne
 #   --registre URL       registre npm (défaut : https://registry.npmjs.org/)
 #   --garder             conserver le dossier temporaire (clone, cache) après la fin
-# Sans réseau et sans --cache-fourni : échec explicite (code 10), rien n'est sauté.
+# Sans réseau et sans --cache-fourni : échec explicite (code 10), rien n'est sauté. Avec --cache-fourni, l'étape
+# installation-archives (registre requis) échoue explicitement (code 11) : la réussite complète exige le réseau.
 # Test seulement : CP_PIEGE=<étape> fait échouer cette étape au milieu (voir scripts/test-construction-propre.sh).
 set -euo pipefail
 
@@ -27,7 +29,7 @@ while [ $# -gt 0 ]; do
     --cache-fourni) CACHE_FOURNI=$2; shift 2;;
     --registre) REGISTRE=$2; shift 2;;
     --garder) GARDER=1; shift;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0;;
     -*) echo "option inconnue : $1" >&2; exit 2;;
     *) [ -z "$COMMIT" ] || { echo "un seul commit attendu" >&2; exit 2; }; COMMIT=$1; shift;;
   esac
@@ -176,6 +178,11 @@ e_archives_livrables() {
   (cd "$SRC/adapter" && npm pack --pack-destination "$SORTIE/archives" --silent)
   (cd "$SORTIE/archives" && sha256sum ./*.tgz > SHA256SUMS && cat SHA256SUMS)
 }
+e_installation_archives() {   # 0.7.0 : les deux archives s'installent et s'importent depuis un HOME et un cache npm VIERGES
+  piege installation-archives
+  if [ -n "$CACHE_FOURNI" ]; then echo "mode hors ligne : installation depuis le registre impossible, étape EXIGÉE en ligne"; exit 11; fi
+  bash "$SRC/scripts/verifier-installation.sh" --registre "$REGISTRE" "$SORTIE/archives"
+}
 
 # ---------- exécution ----------
 bilan "Construction propre de Hermes Control — $(date -Iseconds)"
@@ -200,6 +207,7 @@ etape tests-racine      e_tests_racine
 etape tests-adapter     e_tests_adapter
 etape lot-063           e_lot063
 etape archives-livrables e_archives_livrables
+etape installation-archives e_installation_archives
 bilan ""
 bilan "Archives d'origine (vérifiées, sha512 = origine/INTEGRITE-*) :"
 for f in "$W"/origine/*.tgz; do bilan "  $(sha256sum "$f" | sed "s#  $W/origine/#  #")"; done
@@ -207,6 +215,8 @@ bilan "Correctifs reconstruits par fabriquer.sh (identiques au commit) :"
 while IFS= read -r l; do bilan "  $l"; done < "$SRC/adapter/voie1/paquets/SHA256SUMS"
 bilan "Archives livrables (npm pack depuis le clone) :"
 while IFS= read -r l; do bilan "  $l"; done < "$SORTIE/archives/SHA256SUMS"
+bilan "Installation des archives (HOME et cache npm vierges) :"
+while IFS= read -r l; do bilan "  $l"; done < <(grep -E '^(OK|ÉCHEC)' "$(ls "$SORTIE"/*-installation-archives.log)")
 bilan "Tests et lot-063 :"
 while IFS= read -r l; do bilan "  $l"; done < "$W/lot063.txt"
 bilan ""

@@ -1,6 +1,6 @@
 # Hermes Control — Hermes Agent as the engine, Paperclip in charge
 
-> **Warning — `master` contains 0.6.1 in development: not published and not yet acceptance-tested.** Install **0.5.0** from npm (`paperclip-plugin-hermes-control@0.5.0`, `paperclip-adapter-hermes-control@0.5.0`). 0.5.0 does not provide the 0.6 explicit-assignment guarantees.
+> **Warning — this branch contains 0.7.0 (candidate integrating lot B): not published and not yet acceptance-tested.** From 0.7.0 the packages are named **`@cyberservices-ai/paperclip-plugin-hermes-control`** and **`@cyberservices-ai/paperclip-adapter-hermes-control`** (the plugin id `hermes-control` and the adapter type `hermes_local` are unchanged; migration from the old names: [docs/migration-0.7.0.md](docs/migration-0.7.0.md)). The last published release is **0.5.0**, under the old names (`paperclip-plugin-hermes-control@0.5.0`, `paperclip-adapter-hermes-control@0.5.0`); it does not provide the 0.6 explicit-assignment guarantees.
 
 Source: https://github.com/CyberServices-ai/hermes-control · Author: Cyril M · MIT
 
@@ -17,7 +17,7 @@ A drop-in **override of the built-in `hermes_local` adapter** (an official Paper
 
 Install (local path or npm):
 ```
-paperclipai adapter install --payload-json '{"packageName":"paperclip-adapter-hermes-control"}'
+paperclipai adapter install --payload-json '{"packageName":"@cyberservices-ai/paperclip-adapter-hermes-control"}'
 ```
 Where instances are: the account's `~/.hermes`, plus the folders listed in `<reference>/roots` (one per line: an instance, or a folder of instances). Hermes binary: **only** the one administered in the table (`hermes.binary`, or per instance). No environment variable is read (0.6.1). Pause the adapter any time: `paperclipai adapter override hermes_local` (pause) or `adapter delete hermes_local`; for a full rollback to 0.5.0 see *Rollback*.
 
@@ -95,7 +95,7 @@ When the verdict is incompatible — the normal case with namesakes or renamed a
 Everything done after the backup point is lost: Paperclip issues, comments, runs and agent changes; Hermes sessions, memories and profile changes; profiles prepared by 0.6.1. The restored state is a configuration already known to work with 0.5 — it does not make 0.5 handle namesakes correctly. Then restart Paperclip and check every agent's profile (run log line « → Hermes <instance>/<profile> ») before reopening the work.
 
 ```
-paperclipai plugin install paperclip-plugin-hermes-control
+paperclipai plugin install @cyberservices-ai/paperclip-plugin-hermes-control
 ```
 
 ## 3. With `hermes-paperclip-pack`: profiles prepared with an empty `.env` (0.5, hardened in 0.6)
@@ -140,9 +140,9 @@ Tests never touch the real reference: `vitest.setup.ts` redirects the account ho
 ## License
 MIT © Cyril M
 
-## Known limitations (0.6.3 — acceptance build, not for production)
+## Known limitations (0.7.0 — candidate, not for production)
 
-- **Final agent environment: local patches.** The Hermes process environment is built by allow-list through locally patched copies of two Paperclip dependencies (`adapter/voie1`, not accepted upstream). Names in an agent's `config.env` outside the list are refused (logged by name); `PATH` is the administered binary's folder plus the system path. GitHub projection by Paperclip (`GITHUB_TOKEN`, `SSH_AUTH_SOCK`…) is not passed.
+- **Final agent environment: local patches.** The Hermes process environment is built by allow-list through locally patched copies of two Paperclip dependencies (`adapter/voie1`, not accepted upstream), bundled into the adapter since 0.7.0 (a Paperclip update does not update them: the adapter must be rebuilt on the new base). Names in an agent's `config.env` outside the list are refused (logged by name); `PATH` is the administered binary's folder plus the system path. GitHub projection by Paperclip (`GITHUB_TOKEN`, `SSH_AUTH_SOCK`…) is not passed.
 - **Same Unix user.** Paperclip, Hermes and the agents run as one user: an agent can read the files of that user (Paperclip `.env`, secrets master key, SSH keys…) and reach `/run/user/<uid>` (Hermes rebuilds the D-Bus address from it). A dedicated account is planned, not done.
 - **`local_trusted` mode** has no authentication: company checks cannot be proven there; use `authenticated` mode.
 - **Embedded PostgreSQL** of Paperclip uses fixed local credentials.

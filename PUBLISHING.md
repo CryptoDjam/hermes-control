@@ -18,7 +18,7 @@ Ce qui a marché le 2026-10-03 : `npm login --auth-type=legacy` (mot de passe + 
 scripts/publish.sh            # jeton bypass 2FA
 scripts/publish.sh 123456     # avec un code 2FA
 ```
-Le script lance les tests + builds, saute un paquet déjà publié à cette version, et publie `paperclip-adapter-hermes-control` puis `paperclip-plugin-hermes-control`.
+Le script lance les tests + builds, saute un paquet déjà publié à cette version, et publie l'adaptateur puis le plugin (noms lus dans les `package.json` : depuis 0.7.0 `@cyberservices-ai/paperclip-adapter-hermes-control` puis `@cyberservices-ai/paperclip-plugin-hermes-control`, paquets à portée publique `publishConfig.access: public` ; jusqu'à 0.5.0 `paperclip-adapter-hermes-control` / `paperclip-plugin-hermes-control`). **Avant la première publication 0.7.0** : vérifier que la portée npm `@cyberservices-ai` existe et que le compte a le droit d'y publier (non vérifié à la préparation de 0.7.0), et configurer le Trusted Publishing pour les **nouveaux** noms ; marquer les anciens noms `npm deprecate` avec un renvoi vers les nouveaux (jamais dépublier).
 
 Nouvelle version : changer `version` dans `package.json` **et** `adapter/package.json` (même numéro), ajouter l'entrée dans `CHANGELOG.md`, commit + tag `git tag v0.3.1 && git push --tags`, puis publier.
 
@@ -32,7 +32,7 @@ Sur npmjs.com, pour chaque paquet : Package → Settings → **Trusted Publishin
 **To do (Cyril, on npmjs.com, 2FA):** reconfigure Trusted Publishing of both packages for the owner `CyberServices-ai` (renamed from `CryptoDjam` on 2026-10-06).
 
 ## 4. Catalogue Paperclip Hub + awesome-paperclip
-- Hub : https://cliphub.fyi → *Submit a plugin* → nom npm `paperclip-plugin-hermes-control` (le Hub lit le manifeste depuis npm et vérifie que le compte soumis est mainteneur npm). Texte prêt : `docs/hub-submission.md`.
+- Hub : https://cliphub.fyi → *Submit a plugin* → nom npm `@cyberservices-ai/paperclip-plugin-hermes-control` depuis 0.7.0, `paperclip-plugin-hermes-control` jusqu'à 0.5.0 (le Hub lit le manifeste depuis npm et vérifie que le compte soumis est mainteneur npm). Texte prêt : `docs/hub-submission.md`.
 - awesome-paperclip : https://github.com/gsxdsm/awesome-paperclip → PR ajoutant la ligne de `docs/hub-submission.md`.
 
 ## 5. Vérifier

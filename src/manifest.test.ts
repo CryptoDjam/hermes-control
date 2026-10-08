@@ -72,9 +72,17 @@ describe("manifeste (Paperclip 2026.1001.0)", () => {
     expect(missingCapabilities(manifest as unknown as Record<string, unknown>)).toEqual([]);
   });
 
-  it("version 0.6.3 partout : manifeste, package.json du plugin et de l'adaptateur", () => {
+  it("version 0.7.0 partout : manifeste, package.json du plugin et de l'adaptateur", () => {
     const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
     const apkg = JSON.parse(readFileSync(new URL("../adapter/package.json", import.meta.url), "utf8")) as { version: string };
-    expect([manifest.version, pkg.version, apkg.version]).toEqual(["0.6.3", "0.6.3", "0.6.3"]);
+    expect([manifest.version, pkg.version, apkg.version]).toEqual(["0.7.0", "0.7.0", "0.7.0"]);
+  });
+
+  it("0.7.0 : noms npm @cyberservices-ai, id du manifeste INCHANGÉ (clé du plugin dans Paperclip = manifest.id)", () => {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { name: string };
+    const apkg = JSON.parse(readFileSync(new URL("../adapter/package.json", import.meta.url), "utf8")) as { name: string };
+    expect(pkg.name).toBe("@cyberservices-ai/paperclip-plugin-hermes-control");
+    expect(apkg.name).toBe("@cyberservices-ai/paperclip-adapter-hermes-control");
+    expect(manifest.id).toBe("hermes-control");
   });
 });

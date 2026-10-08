@@ -1,9 +1,13 @@
 # Correctifs locaux « voie 1 » — provenance et licences
 
-Hermes Control 0.6.3 livre, avec son adaptateur, des **copies corrigées** de deux dépendances Paperclip. Ce sont des
+Hermes Control (depuis 0.6.3) livre, avec son adaptateur, des **copies corrigées** de deux dépendances Paperclip.
+**Depuis 0.7.0**, ces copies ne sont plus livrées comme archives `file:` : elles sont **intégrées dans le bundle**
+`dist/index.js` de l'adaptateur (avec leurs dépendances d'exécution `@paperclipai/shared`, `zod`, `yaml`), et leurs licences
+sont recopiées dans `dist/THIRD_PARTY_LICENSES.md` (généré par `esbuild.config.mjs`). Les archives `paquets/*.tgz` restent
+la source du build (devDependencies, reconstruites par `fabriquer.sh`, empreintes `paquets/SHA256SUMS`). Ce sont des
 correctifs **locaux** : ils ne sont ni proposés ni acceptés par le mainteneur à ce jour.
 
-| Paquet | Base publiée (npm) | Licence de la base | Copie livrée |
+| Paquet | Base publiée (npm) | Licence de la base | Copie corrigée (source du bundle) |
 |---|---|---|---|
 | `@paperclipai/adapter-utils` | 2026.1001.0 (intégrité dans `origine/INTEGRITE-2026.1001.0`) | MIT, déclarée dans son `package.json` (le paquet publié ne contient pas de fichier LICENSE ; dépôt `github.com/paperclipai/paperclip`, `packages/adapter-utils`) | `paquets/paperclipai-adapter-utils-2026.1001.0-hc063.1.tgz` |
 | `@paperclipai/hermes-paperclip-adapter` | 2026.1001.0 | MIT, fichier `LICENSE` du paquet (« Copyright (c) 2026 Nous Research »), conservé dans la copie | `paquets/paperclipai-hermes-paperclip-adapter-2026.1001.0-hc063.1.tgz` |

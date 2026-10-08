@@ -1,7 +1,7 @@
 # Texte prêt pour le Paperclip Hub et awesome-paperclip
 
 **Name**: Hermes Control
-**npm**: paperclip-plugin-hermes-control (+ companion adapter: paperclip-adapter-hermes-control)
+**npm**: @cyberservices-ai/paperclip-plugin-hermes-control (+ companion adapter: @cyberservices-ai/paperclip-adapter-hermes-control; before 0.7.0: paperclip-plugin-hermes-control / paperclip-adapter-hermes-control)
 **Author**: Cyril M (npm: cyberservices-ai · GitHub: CyberServices-ai)
 **Repository**: https://github.com/CyberServices-ai/hermes-control
 **Categories**: automation, ui

@@ -1,4 +1,4 @@
-# paperclip-adapter-hermes-control
+# @cyberservices-ai/paperclip-adapter-hermes-control
 
 The adapter half of **Hermes Control** — a drop-in override of Paperclip's built-in `hermes_local` adapter:
 - the agent's **Provider** and **Model** menus list the providers and models your Hermes instances know;
@@ -10,10 +10,12 @@ The adapter half of **Hermes Control** — a drop-in override of Paperclip's bui
 
 Install into Paperclip:
 ```
-npx paperclipai adapter install --payload-json '{"packageName":"paperclip-adapter-hermes-control"}'
+npx paperclipai adapter install --payload-json '{"packageName":"@cyberservices-ai/paperclip-adapter-hermes-control"}'
 ```
 Instances are looked up in the account's `~/.hermes` and in the folders listed in `<reference>/roots` (one per line). Hermes binary: only the one administered in the table (`hermes.binary`). The `HERMES_CONTROL_*` variables are no longer read; if one is still set in the service, runs are refused. Pause or remove any time: `paperclipai adapter override hermes_local` / `adapter delete hermes_local`. Full configuration contract, controlled execution and rollback: see the main README.
 
-Pairs with the plugin `paperclip-plugin-hermes-control` (Paperclip → Hermes sync + instances view). Source and docs: https://github.com/CyberServices-ai/hermes-control
+Self-contained since 0.7.0: the two patched Paperclip modules (« voie 1 », `voie1/LICENCES.md`) are bundled into `dist/index.js` (licences: `dist/THIRD_PARTY_LICENSES.md`); the package has no install-time dependency. Before 0.7.0 the package was named `paperclip-adapter-hermes-control`: see `docs/migration-0.7.0.md` in the repository (the adapter type stays `hermes_local`).
+
+Pairs with the plugin `@cyberservices-ai/paperclip-plugin-hermes-control` (Paperclip → Hermes sync + instances view). Source and docs: https://github.com/CyberServices-ai/hermes-control
 
 MIT © Cyril M

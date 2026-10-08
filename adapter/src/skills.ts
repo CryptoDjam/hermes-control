@@ -14,6 +14,7 @@ import type { AdapterSkillEntry, AdapterSkillSnapshot } from "@paperclipai/adapt
 import { lstat, mkdir, readFile, readdir, realpath, stat, unlink } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 type AnyRecord = Record<string, unknown>;
 
@@ -30,8 +31,14 @@ export function profileSkillsDir(profileHome: string): string {
   return join(profileHome, "skills");
 }
 
+/** Défini à `true` par le build (bundle autonome 0.7.0) ; absent sous les tests (sources lues par vitest). */
+declare const __HC_BUNDLE__: boolean | undefined;
+
 /** Dossier de l'adaptateur Hermes officiel : sert de secours quand Paperclip n'envoie pas l'inventaire. */
-function officialModuleDir(): string {
+export function officialModuleDir(): string {
+  // bundle autonome : l'adaptateur officiel corrigé est intégré, ses ressources (skills/) sont vendues sous dist/vendor ;
+  // ne JAMAIS résoudre un autre exemplaire installé ailleurs (il ne serait pas la copie corrigée)
+  if (typeof __HC_BUNDLE__ !== "undefined" && __HC_BUNDLE__) return join(dirname(fileURLToPath(import.meta.url)), "vendor", "hermes-paperclip-adapter", "dist", "server");
   try {
     const req = createRequire(import.meta.url);
     return dirname(req.resolve("@paperclipai/hermes-paperclip-adapter/server"));
