@@ -16,12 +16,13 @@
 #                        doivent y être ; les archives d'origine y sont vérifiées par leur sha512 comme en ligne
 #   --registre URL       registre npm (défaut : https://registry.npmjs.org/)
 #   --garder             conserver le dossier temporaire (clone, cache) après la fin
+#   --travail DIR        où créer ce dossier temporaire (défaut : $TMPDIR ou /tmp) ; TMPDIR des tests inchangé (court)
 # Sans réseau et sans --cache-fourni : échec explicite (code 10), rien n'est sauté. Avec --cache-fourni, l'étape
 # installation-archives (registre requis) échoue explicitement (code 11) : la réussite complète exige le réseau.
 # Test seulement : CP_PIEGE=<étape> fait échouer cette étape au milieu (voir scripts/test-construction-propre.sh).
 set -euo pipefail
 
-DEPOT=""; SORTIE=""; CACHE_FOURNI=""; REGISTRE="https://registry.npmjs.org/"; GARDER=0; COMMIT=""
+DEPOT=""; SORTIE=""; CACHE_FOURNI=""; REGISTRE="https://registry.npmjs.org/"; GARDER=0; COMMIT=""; TRAVAIL=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --depot) DEPOT=$2; shift 2;;
@@ -29,12 +30,13 @@ while [ $# -gt 0 ]; do
     --cache-fourni) CACHE_FOURNI=$2; shift 2;;
     --registre) REGISTRE=$2; shift 2;;
     --garder) GARDER=1; shift;;
-    -h|--help) sed -n '2,21p' "$0"; exit 0;;
+    --travail) TRAVAIL=$2; shift 2;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0;;
     -*) echo "option inconnue : $1" >&2; exit 2;;
     *) [ -z "$COMMIT" ] || { echo "un seul commit attendu" >&2; exit 2; }; COMMIT=$1; shift;;
   esac
 done
-[ -n "$COMMIT" ] || { echo "usage : $0 [--depot DIR] [--sortie DIR] [--cache-fourni DIR] [--registre URL] [--garder] <commit>" >&2; exit 2; }
+[ -n "$COMMIT" ] || { echo "usage : $0 [--depot DIR] [--sortie DIR] [--cache-fourni DIR] [--registre URL] [--garder] [--travail DIR] <commit>" >&2; exit 2; }
 [ -n "$DEPOT" ] || DEPOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 DEPOT=$(cd "$DEPOT" && pwd)
 SHA=$(git -C "$DEPOT" rev-parse --verify "$COMMIT^{commit}")
@@ -46,7 +48,7 @@ fi
 mkdir -p "$SORTIE"; SORTIE=$(cd "$SORTIE" && pwd)
 [ -z "$(ls -A "$SORTIE")" ] || { echo "dossier de sortie non vide : $SORTIE" >&2; exit 2; }
 
-W=$(mktemp -d "${TMPDIR:-/tmp}/construction-propre.XXXXXX")
+W=$(mktemp -d "${TRAVAIL:-${TMPDIR:-/tmp}}/construction-propre.XXXXXX")
 nettoyer() { if [ "$GARDER" = 1 ]; then echo "dossier temporaire conservé : $W"; else rm -rf "$W"; fi; }
 trap nettoyer EXIT
 SRC="$W/src"; BILAN="$SORTIE/bilan.txt"
