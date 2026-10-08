@@ -5,6 +5,8 @@
 #   contrôles : aucune dépendance `file:` ni archive embarquée dans les paquets installés ; l'adaptateur s'importe PAR SON NOM
 #   (createServerAdapter().type = hermes_local, copies corrigées voie 1 intégrées : voie1Status().ok, URL #bundle:) ;
 #   le manifeste du plugin s'importe (id hermes-control, version = package.json) ; `npm ls` sans erreur.
+#   Puis HORS LIGNE (0.7.0) : autre projet, autre HOME, cache npm VIDE et registre INJOIGNABLE (127.0.0.1:9) : l'installation
+#   des deux archives doit réussir (aucune dépendance à tirer) et les mêmes imports aussi.
 # Usage : scripts/verifier-installation.sh [--registre URL] <dossier contenant les deux .tgz>
 # Code ≠ 0 au premier contrôle en erreur. Réseau requis (registre npm) pour les dépendances du plugin.
 set -euo pipefail
@@ -20,9 +22,9 @@ W=$(mktemp -d "${TMPDIR:-/tmp}/verifier-installation.XXXXXX"); trap 'rm -rf "$W"
 mkdir -p "$W/home" "$W/cache" "$W/projet"
 : > "$W/home/.npmrc"; : > "$W/npmrc-global"
 # environnement vide : seul PATH est gardé (node/npm), rien d'autre du poste
-run() { env -i PATH="$PATH" HOME="$W/home" TMPDIR="${TMPDIR:-/tmp}" npm_config_cache="$W/cache" npm_config_userconfig="$W/home/.npmrc" \
-  npm_config_globalconfig="$W/npmrc-global" npm_config_registry="$REGISTRE" npm_config_audit=false npm_config_fund=false \
-  npm_config_update_notifier=false "$@"; }
+run() { env -i PATH="$PATH" HOME="${H:-$W/home}" TMPDIR="${TMPDIR:-/tmp}" npm_config_cache="${C:-$W/cache}" npm_config_userconfig="$W/home/.npmrc" \
+  npm_config_globalconfig="$W/npmrc-global" npm_config_registry="${R:-$REGISTRE}" npm_config_audit=false npm_config_fund=false \
+  npm_config_update_notifier=false npm_config_fetch_retries=0 npm_config_fetch_timeout=5000 "$@"; }
 cp "$PLUGIN" "$ADAPT" "$W/"
 cd "$W/projet"
 printf '{ "name": "projet-fictif", "version": "1.0.0", "private": true, "type": "module" }\n' > package.json
@@ -66,3 +68,18 @@ process.exit(ko ? 1 : 0);
 JS
 run node import.mjs
 echo "== installation et import vérifiés depuis un HOME et un cache npm vierges"
+
+# ---- hors ligne : cache vide + registre injoignable ----
+export H="$W/home-hl" C="$W/cache-hl" R="http://127.0.0.1:9/"
+mkdir -p "$H" "$C" "$W/projet-hl"
+cp "$W/projet/package.json" "$W/projet/import.mjs" "$W/projet-hl/"
+cd "$W/projet-hl"
+echo "== HORS LIGNE : cache npm vide ($(find "$C" -type f | wc -l) fichier(s)), registre injoignable $R"
+run npm install --ignore-scripts "$W/$(basename "$PLUGIN")" "$W/$(basename "$ADAPT")"
+run npm ls --all > "$W/npm-ls-hl.txt" || { cat "$W/npm-ls-hl.txt"; echo "npm ls en erreur (hors ligne)"; exit 1; }
+echo "== npm ls hors ligne : $(grep -c . "$W/npm-ls-hl.txt") ligne(s), sans erreur"
+[ "$(ls node_modules | tr '\n' ' ')" = "@cyberservices-ai " ] && [ "$(ls node_modules/@cyberservices-ai | wc -l)" = 2 ] \
+  || { ls -R node_modules | head -20; echo "paquets inattendus installés hors ligne"; exit 1; }
+echo "== hors ligne : seuls les deux paquets Hermes Control sont installés"
+run node import.mjs
+echo "== installation et import vérifiés HORS LIGNE (cache vide, registre injoignable)"

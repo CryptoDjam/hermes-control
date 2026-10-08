@@ -123,6 +123,11 @@ paperclipai plugin install paperclip-plugin-hermes-control@<version>
   L'archive n'a plus **aucune dépendance** à l'installation : l'ancienne archive dépendait de `file:voie1/paquets/*.tgz`,
   qu'npm ne sait pas résoudre depuis un paquet installé (échec `ENOENT` reproduit avec un cache vide). La ressource lue à
   l'exécution par l'adaptateur officiel (`skills/paperclip-task-bridge`) est livrée sous `dist/vendor/`.
+- **Plugin autonome aussi** : plus aucune dépendance d'exécution (`yaml` et `@paperclipai/plugin-sdk` sont intégrés au
+  worker ; React et `@paperclipai/plugin-sdk/ui` sont fournis par l'hôte dans le navigateur). Le pair
+  `@paperclipai/plugin-sdk` est déclaré **optionnel** : npm ne le télécharge pas. Les deux archives s'installent donc
+  **hors ligne** (cache npm vide, registre injoignable), vérifié par `scripts/verifier-installation.sh`. Licences :
+  `dist/THIRD_PARTY_LICENSES.md`.
 - Conséquence : une mise à jour de Paperclip **ne met pas à jour** ces copies ; il faut reconstruire l'adaptateur sur la
   nouvelle base (`voie1/fabriquer.sh` échoue explicitement si la base ne correspond plus).
 - `engines.node` de l'adaptateur : `>=24.11.0` (comme Paperclip 2026.1001.0 et les modules intégrés).

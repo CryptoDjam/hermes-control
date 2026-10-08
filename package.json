@@ -26,6 +26,7 @@
   },
   "files": [
     "dist/**/*.js",
+    "dist/THIRD_PARTY_LICENSES.md",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -40,6 +41,11 @@
   "peerDependencies": {
     "@paperclipai/plugin-sdk": ">=2026.1001.0"
   },
+  "peerDependenciesMeta": {
+    "@paperclipai/plugin-sdk": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@paperclipai/plugin-sdk": "^2026.1001.0",
     "@paperclipai/shared": "2026.1001.0",
@@ -48,9 +54,7 @@
     "esbuild": "^0.24.0",
     "react": "^18.3.1",
     "typescript": "^5.6.3",
-    "vitest": "^2.1.4"
-  },
-  "dependencies": {
+    "vitest": "^2.1.4",
     "yaml": "^2.6.0"
   },
   "allowScripts": {

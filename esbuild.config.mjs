@@ -1,5 +1,11 @@
 // Build : worker + manifeste (Node, ESM) et UI (navigateur, ESM, React fourni par l'hôte Paperclip).
 import { build, context } from "esbuild";
+import { writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { licencesTiers } from "./scripts/licences-tiers.mjs";
+
+const ICI = dirname(fileURLToPath(import.meta.url));
 
 const watch = process.argv.includes("--watch");
 const hostProvided = ["react", "react-dom", "react/jsx-runtime", "react-dom/client"];
@@ -39,5 +45,13 @@ if (watch) {
   for (const t of targets) (await context(t)).watch();
   console.log("hermes-control : surveillance des fichiers…");
 } else {
-  for (const t of targets) await build(t);
+  // 0.7.0 : paquet AUTONOME — toute dépendance d'exécution (yaml, plugin-sdk côté worker…) est intégrée ; seuls restent
+  // externes Node et ce que l'hôte Paperclip fournit (React, @paperclipai/plugin-sdk/ui dans le navigateur)
+  const metafiles = [];
+  for (const t of targets) metafiles.push((await build({ ...t, absWorkingDir: ICI, metafile: true })).metafile);
+  const { texte, noms } = await licencesTiers(ICI, metafiles, ["# Modules tiers intégrés dans dist/ (worker, manifeste, lib, commande, UI)", "",
+    "Généré par `esbuild.config.mjs` depuis les métafichiers du build. React et `@paperclipai/plugin-sdk/ui` ne sont pas intégrés",
+    "dans l'UI : ils sont fournis par l'hôte Paperclip."]);
+  await writeFile(`${ICI}/dist/THIRD_PARTY_LICENSES.md`, texte);
+  console.log(`intégrés : ${noms.join(", ")}`);
 }

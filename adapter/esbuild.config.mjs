@@ -13,9 +13,9 @@
 // Sortie : dist/index.js, dist/vendor/…/skills, dist/THIRD_PARTY_LICENSES.md (licences des modules intégrés, depuis le métafichier).
 import { build } from "esbuild";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { licencesTiers } from "../scripts/licences-tiers.mjs";
 
 const ICI = dirname(fileURLToPath(import.meta.url));
 const HPA = join(ICI, "node_modules", "@paperclipai", "hermes-paperclip-adapter");
@@ -73,24 +73,9 @@ await mkdir(join(ICI, "dist", VENDOR_HPA), { recursive: true });
 await cp(join(HPA, "skills"), join(ICI, "dist", VENDOR_HPA, "skills"), { recursive: true });
 
 // licences des paquets intégrés (depuis le métafichier : chaque node_modules/<paquet> qui a fourni du code)
-const paquets = new Map();
-for (const entree of Object.keys(r.metafile.inputs)) {
-  const m = entree.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//g);
-  if (!m) continue;
-  const dernier = m[m.length - 1].replace(/^\//, "");
-  const racine = join(ICI, entree.slice(0, entree.lastIndexOf(dernier) + dernier.length));
-  paquets.set(racine, true);
-}
-const lignes = ["# Modules tiers intégrés dans dist/index.js", "",
+const { texte, noms } = await licencesTiers(ICI, [r.metafile], ["# Modules tiers intégrés dans dist/index.js", "",
   "Généré par `esbuild.config.mjs` depuis le métafichier du build. Les deux paquets `@paperclipai/*` sont les copies corrigées",
   "« voie 1 » (base 2026.1001.0 publiée + `voie1/patches/`, provenance : `voie1/LICENCES.md`). Les modifications de Hermes Control",
-  "sont sous licence MIT (Cyril M).", ""];
-for (const racine of [...paquets.keys()].sort()) {
-  const j = JSON.parse(await readFile(join(racine, "package.json"), "utf8"));
-  const lic = ["LICENSE", "LICENSE.md", "LICENSE.txt", "license", "LICENCE"].map((f) => join(racine, f)).find((f) => existsSync(f));
-  lignes.push(`## ${j.name}@${j.version} — ${j.license ?? "licence non déclarée"}`, "");
-  if (j.hermesControlPatch) lignes.push(`Copie corrigée (voie 1) de ${j.hermesControlPatch.base}.`, "");
-  lignes.push(lic ? "```\n" + (await readFile(lic, "utf8")).trim() + "\n```" : `Pas de fichier de licence dans le paquet publié ; licence déclarée dans son package.json : ${j.license ?? "aucune"}.${j.repository ? ` Source : ${typeof j.repository === "string" ? j.repository : j.repository.url}.` : ""}`, "");
-}
-await writeFile(join(ICI, "dist", "THIRD_PARTY_LICENSES.md"), lignes.join("\n"));
-console.log(`intégrés : ${[...paquets.keys()].map((p) => p.split("node_modules/").pop().replace(/\/$/, "")).join(", ")}`);
+  "sont sous licence MIT (Cyril M)."]);
+await writeFile(join(ICI, "dist", "THIRD_PARTY_LICENSES.md"), texte);
+console.log(`intégrés : ${noms.join(", ")}`);
