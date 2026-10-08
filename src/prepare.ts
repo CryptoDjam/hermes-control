@@ -12,9 +12,11 @@
 // (`prepareAgent` relancé termine le nettoyage). Un profil sans ces marqueurs (fait à la main) n'est jamais vidé.
 import { lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
+import { budgetSockets } from "./health.js";
 import { type HermesBin, assertSafeName, profileCreate, profileHome } from "./hermes.js";
 import { withDirLock } from "./lock.js";
 import { slug } from "./match.js";
+import { type Owner, assertInside, claimAgentDir } from "./proprietaire.js";
 import { type Workspace, exists } from "./workspace.js";
 
 export interface PrepareInput {
@@ -24,6 +26,15 @@ export interface PrepareInput {
   title?: string | null; // titre Paperclip (« Directrice marketing »)
   binary?: HermesBin; // binaire administré et vérifié (sans lui, aucun clone possible)
   entreprise?: string | null;
+  // Lot B (08/10) — identité Paperclip qui possède le dossier métier (obligatoire : sans elle, aucun propriétaire fiable).
+  owner: Owner;
+  // Mode projection (cible 0.2) : nom du profil = alias (a00001) et dossier métier <ws>/donnees/e/<e>/a/<a>, fournis par
+  // la projection du pack. Absents (0.6.x) : slug du nom et <ws>/agents/<slug>.
+  profile?: string;
+  agentDir?: string;
+  // HERMES_HOME LITTÉRAL qui sera transmis à Hermes pour ce profil (racine d'exécution administrée) ; défaut : le profil
+  // sous instanceHome. T16 est mesuré sur cette chaîne AVANT toute création.
+  executionHome?: string;
 }
 
 export interface PrepareResult {
@@ -47,7 +58,7 @@ Tes instructions (mission, commandes rapides, règles) viennent de **Paperclip**
 Ta mémoire : \`memories/MEMORY.md\` (faits stables) et \`memories/USER.md\` (ton interlocuteur). Le passé des tickets : \`hindsight_recall\` si l'outil est présent.
 `,
   "MEMORY.md": `# Mémoire de {{nom}}
-- Dossier de travail : {{ws}}. Mes dossiers : agents/{{slug}}/ (rapports/, memoire/, medias/{brouillons,valides,publies}/).
+- Dossier de travail : {{ws}}. Mes dossiers : {{dossier}}/ (rapports/, memoire/, medias/{brouillons,valides,publies}/).
 - Moteur : Hermes, lancé par Paperclip ; mes instructions viennent de Paperclip.
 - Mémoire des tickets : hindsight_recall seulement (jamais hindsight_retain).
 `,
@@ -60,7 +71,7 @@ Ta mémoire : \`memories/MEMORY.md\` (faits stables) et \`memories/USER.md\` (to
 nom: {{slug}}
 plateforme: paperclip
 moteur: "Hermes, profil « {{slug}} » de l'instance « {{instance}} »"
-dossier_travail: {{ws}}/agents/{{slug}}
+dossier_travail: {{dossier}}
 statut: préparé automatiquement par Hermes Control le {{date}}
 ---
 
@@ -246,9 +257,13 @@ async function commonSkills(ws: Workspace): Promise<string[]> {
 }
 
 export async function prepareAgent(input: PrepareInput): Promise<PrepareResult> {
-  const s = slug(input.agentName);
+  if (!input.owner?.companyId || !input.owner?.agentId) throw new Error("préparation refusée : identité Paperclip (companyId, agentId) requise pour enregistrer le propriétaire du dossier métier");
+  const s = input.profile ?? slug(input.agentName);
   if (!s) throw new Error(`nom d'agent inutilisable : « ${input.agentName} »`);
   assertSafeName(s);
+  // T16 AVANT tout (verrou compris) : chaîne littérale transmise en HERMES_HOME, suffixes réels de Hermes, PID au pire
+  const b = budgetSockets(input.executionHome ?? profileHome(input.instanceHome, s));
+  if (!b.ok) throw new Error(`préparation refusée avant toute création : socket ${b.pire} = ${b.octets} octets UTF-8 > ${b.limite} (T16, chaîne transmise à bind()) ; enveloppe ou racine d'exécution trop longue ; rien n'est créé`);
   return withPrepareLock(input.instanceHome, s, () => prepareLocked(input, s));
 }
 
@@ -257,6 +272,24 @@ async function prepareLocked(input: PrepareInput, s: string): Promise<PrepareRes
   const created: string[] = [];
   const warnings: string[] = [];
   const home = profileHome(input.instanceHome, s);
+
+  // 0. le profil, s'il existe, est bien dans l'instance (pas un lien vers le profil d'un autre) ; destination canonique
+  //    vérifiée à part de la chaîne littérale (T16)
+  const instReal = await realpath(input.instanceHome);
+  if (await exists(home)) {
+    const real = await realpath(home);
+    if (real !== join(instReal, "profiles", s)) throw new Error(`préparation refusée : le profil ${home} se résout en ${real} (lien étranger) ; rien n'est créé`);
+  }
+  // 1'. le dossier métier : à cette identité, ou créé pour elle (jamais adopté) — AVANT le profil : un refus ne crée rien
+  const agentDir = input.agentDir ?? join(input.ws.agents, s);
+  if ((await claimAgentDir(agentDir, input.owner)) === "cree") created.push(`${agentDir} (propriétaire ${input.owner.agentId})`);
+  const agentReal = await realpath(agentDir);
+  for (const d of ["rapports", "memoire", "medias", "medias/brouillons", "medias/valides", "medias/publies"]) await assertInside(join(agentDir, d), agentReal);
+  const mem = join(home, "memories");
+  if (await lstat(mem).then((x) => x.isSymbolicLink(), () => false)) {
+    const target = await realpath(mem).catch(() => null);
+    if (target !== null && target !== join(agentReal, "memoire")) throw new Error(`préparation refusée : ${mem} pointe vers ${target}, pas vers la mémoire de cet agent (${join(agentReal, "memoire")}) : lien étranger ; rien n'est suivi ni remplacé`);
+  }
 
   // 1. le profil Hermes (clone de l'instance : config.yaml, .env, SOUL.md, skills)
   const preparing = preparingFile(input.instanceHome, s);
@@ -296,7 +329,6 @@ async function prepareLocked(input: PrepareInput, s: string): Promise<PrepareRes
   if (!(await exists(join(home, "config.yaml")))) throw new Error(`le profil ${home} n'a pas été créé par hermes`);
 
   // 2. les dossiers de l'agent
-  const agentDir = join(input.ws.agents, s);
   for (const d of ["", "rapports", "memoire", "medias/brouillons", "medias/valides", "medias/publies"]) await ensureDir(join(agentDir, d), created);
 
   // 3. les fichiers de départ (gabarits)
@@ -309,6 +341,7 @@ async function prepareLocked(input: PrepareInput, s: string): Promise<PrepareRes
     entreprise: input.entreprise ?? basename(input.instanceHome),
     instance: basename(input.instanceHome),
     ws: input.ws.root,
+    dossier: agentDir,
     date: new Date().toISOString().slice(0, 10),
     skills: skills.length ? skills.map((k) => `- \`${k}\``).join("\n") : "- (aucun skill commun pour l'instant)",
   };
@@ -326,7 +359,12 @@ async function prepareLocked(input: PrepareInput, s: string): Promise<PrepareRes
 
   // 4. les autres liens : journal, skills communs
   await mkdir(join(home, "logs"), { recursive: true });
-  await ensureLink(join(agentDir, "journal"), join(home, "logs"), created, warnings);
+  const journal = join(agentDir, "journal");
+  if (await lstat(journal).then(() => true, () => false)) {
+    const t = await realpath(journal).catch(() => null);
+    if (t !== null && t !== (await realpath(join(home, "logs")))) throw new Error(`préparation refusée : ${journal} pointe vers ${t}, pas vers le journal du profil : lien étranger ; rien n'est remplacé`);
+  }
+  await ensureLink(journal, join(home, "logs"), created, warnings);
   await mkdir(join(home, "skills"), { recursive: true });
   for (const k of skills) await ensureLink(join(home, "skills", k), join(input.ws.skills, k), created, warnings);
 

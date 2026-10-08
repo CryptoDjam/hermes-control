@@ -8,7 +8,7 @@ describe("checkProfile", () => {
   it("mesure gateway.sock, le socket du watchdog (state/gateway.loop-tick.<pid 7 chiffres>.sock) et les *.sock présents (home et state/)", async () => {
     const short = await mkdtemp(join(tmpdir(), "hc-h-"));
     const ok = await checkProfile(short);
-    expect(expectedSocketPaths(short)).toEqual([join(short, "gateway.sock"), join(short, "state", `gateway.loop-tick.${WORST_CASE_PID}.sock`)]);
+    expect(expectedSocketPaths(short)).toEqual([join(short, "gateway.sock"), join(short, "state", `gateway.loop-tick.${WORST_CASE_PID}.sock`), join(short, "bot-desktop", "rfb.sock")]);
     expect(WORST_CASE_PID).toBe("4194304");
     expect(ok.longest).toBe(join(short, "state", "gateway.loop-tick.4194304.sock"));
     expect(ok.socketPathBytes).toBe(Buffer.byteLength(ok.longest));

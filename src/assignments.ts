@@ -27,6 +27,7 @@ import { withDirLock } from "./lock.js";
 import { accountHome, controlDir } from "./paths.js";
 import { type Projection, projectionOf, readProjection, writeProjection } from "./agents-map.js";
 import { readWorkspace } from "./workspace.js";
+import { instanceDir, projectionMode, readIdentites } from "./identites.js";
 
 export interface CompanyEntry {
   name: string;
@@ -68,6 +69,9 @@ export interface ReadResult {
   exists: boolean;
   error: string | null; // fichier illisible, JSON corrompu ou schéma invalide : la table entière est REFUSÉE
   issues: TableIssues; // problèmes relationnels par entrée (l'entrée est refusée, le reste de la table reste valide)
+  // Lot B (prototype) : « projection » = <ws>/donnees/identites.json présent ; companies/agents viennent alors de la projection
+  // du pack (lecture seule), assignments.json ne garde que les réglages d'exécution (binaire, racine d'exécution).
+  mode?: "table" | "projection";
 }
 
 export interface ResolvedAssignment extends AgentAssignment {
@@ -203,7 +207,7 @@ export function hermesSpecFor(table: Pick<AssignmentsTable, "hermes" | "instance
 export async function knownRoots(): Promise<string[]> {
   const out = new Set<string>();
   const ws = await readWorkspace();
-  for (const r of [...(await configuredRoots()), ...(ws ? [ws.profils] : [])]) {
+  for (const r of [...(await configuredRoots()), ...(ws ? [ws.profils, join(ws.root, "donnees", "h")] : [])]) {
     const real = await realpath(r).catch(() => null);
     if (real) out.add(real);
   }
@@ -306,6 +310,34 @@ export async function relationalIssues(table: AssignmentsTable, roots: string[])
 /* ---------- lecture ---------- */
 
 export async function readAssignments(opts: { roots?: string[] } = {}): Promise<ReadResult> {
+  const r = await readTableFile(opts);
+  const ws = await readWorkspace();
+  if (!(await projectionMode(ws))) return { ...r, mode: "table" };
+  // mode projection : la table des affectations n'est plus une source ; une table qui porte encore companies/agents
+  // serait un registre concurrent → refus entier (migration à faire), jamais de fusion
+  const refuse = (error: string): ReadResult => ({ table: emptyTable(), raw: r.raw, sha256: r.sha256, exists: true, error, issues: noIssues(), mode: "projection" });
+  if (r.error) return refuse(`${r.error} (réglages d'exécution illisibles)`);
+  if (Object.keys(r.table.companies).length || Object.keys(r.table.agents).length) return refuse(`registre concurrent : ${assignmentsFile()} porte encore des entreprises/agents alors que la projection ${join(ws!.root, "donnees", "identites.json")} fait foi ; retire-les (migration), rien n'est fusionné`);
+  const { projection, error } = await readIdentites(ws!);
+  if (!projection) return refuse(`${error} ; aucune affectation n'est résolue`);
+  const table: AssignmentsTable = { ...r.table, companies: {}, agents: {} };
+  const real = async (p: string) => realpath(p).catch(() => p);
+  for (const co of projection.companies) {
+    if (co.statut === "retire") continue;
+    const inst: string[] = [];
+    for (const i of projection.instances.filter((x) => x.companyAlias === co.alias)) inst.push(await real(instanceDir(ws!, i.alias)));
+    table.companies[co.companyId] = { name: co.name, instances: inst };
+  }
+  for (const a of projection.agents) {
+    if (!a.instanceAlias || a.statut === "retire") continue;
+    const co = projection.companies.find((x) => x.alias === a.companyAlias)!;
+    table.agents[a.agentId] = { companyId: co.companyId, instanceHome: await real(instanceDir(ws!, a.instanceAlias)), profile: a.profileAlias, name: a.name, assignedAt: a.affecteLe ?? "", assignedBy: `identites.json r${projection.revision}${a.affectePar ? ` (${a.affectePar})` : ""}` };
+  }
+  const issues = await relationalIssues(table, opts.roots ?? (await knownRoots()));
+  return { table, raw: r.raw, sha256: r.sha256, exists: true, error: null, issues, mode: "projection" };
+}
+
+async function readTableFile(opts: { roots?: string[] }): Promise<ReadResult> {
   const file = assignmentsFile();
   let raw: string;
   try {
@@ -360,6 +392,7 @@ export async function resolveAssignment(agentId: string, opts: { companyId?: str
   let table = read.table;
   let issues = read.issues;
   let source: ResolvedAssignment["source"] = "table";
+  if (read.error && read.mode === "projection") return { ok: null, reason: read.error }; // aucun secours en mode projection
   if (read.error) {
     const { projection } = await readProjection();
     if (!projection || !read.sha256 || projection.derivedFrom.sha256 !== read.sha256) return { ok: null, reason: `${read.error} ; aucune projection agents.json de secours à la même empreinte` };
@@ -404,6 +437,16 @@ async function mutate(change: (table: AssignmentsTable) => void | Promise<void>,
     if (before.error) throw new Error(`${before.error} ; rien n'est écrit — répare ou supprime ${assignmentsFile()}`);
     const table: AssignmentsTable = JSON.parse(JSON.stringify(before.table)) as AssignmentsTable;
     await change(table);
+    if (before.mode === "projection") {
+      // HC ne modifie jamais les identités ni les affectations : elles s'administrent dans le pack (identites affecter)
+      if (JSON.stringify([table.companies, table.agents]) !== JSON.stringify([before.table.companies, before.table.agents])) throw new Error("affectation refusée : en mode projection, entreprises, instances autorisées et affectations s'administrent dans le pack (hermes-paperclip-pack identites affecter --agent <id> --instance <iNNNNN>) ; rien n'est écrit");
+      const own: AssignmentsTable = { schemaVersion: 1, companies: {}, agents: {}, ...(table.hermes ? { hermes: table.hermes } : {}), ...(table.instances ? { instances: table.instances } : {}) };
+      const after = await relationalIssues(table, r);
+      const fresh = Object.entries(after.instances).filter(([id, why]) => before.issues.instances[id] !== why).map(([id, why]) => `instance ${id} : ${why}`);
+      if (fresh.length) throw new Error(`réglage refusé : ${fresh.join(" ; ")}`);
+      await writeTable(own);
+      return table;
+    }
     const after = await relationalIssues(table, r);
     const fresh: string[] = [];
     for (const [id, why] of Object.entries(after.companies)) if (before.issues.companies[id] !== why) fresh.push(`entreprise ${id} : ${why}`);
@@ -511,6 +554,7 @@ export async function unassignAgent(agentId: string, opts: { roots?: string[]; c
 
 /** Remplace la table entière (migration) : validée comme toute écriture ; `--apply` du script seulement. */
 export async function replaceTable(table: AssignmentsTable, opts: { roots?: string[] } = {}): Promise<AssignmentsTable> {
+  if (await projectionMode(await readWorkspace())) throw new Error("table refusée : mode projection (donnees/identites.json) ; les affectations ne s'écrivent plus dans assignments.json");
   const p = parseTable(table);
   if (p.table === null) throw new Error(p.error);
   const roots = opts.roots ?? (await knownRoots());

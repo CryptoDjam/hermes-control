@@ -20,6 +20,9 @@ import { EMPTY_ENV, prepareAgent, preparingFile, profileUsability } from "./prep
 import { checkProfile } from "./health.js";
 import { ownerFile, readOwner, withDirLock } from "./lock.js";
 
+/** Identité Paperclip fictive (lot B : propriétaire obligatoire du dossier métier). */
+const OWN = { companyId: "c0000000-0000-4000-8000-000000000001", agentId: "a0000000-0000-4000-8000-000000000001" };
+
 let root: string;
 let profile: string;
 let fakeBin: string;
@@ -105,7 +108,7 @@ it("sonde n°4 inversée : un clone partiel en échec NE LAISSE PAS le marqueur 
   const fake = join(root, "fake-partial-clone");
   await writeFile(fake, '#!/bin/sh\np="$HERMES_HOME/profiles/$3"\nmkdir -p "$p"\nprintf "model: {}\\n" > "$p/config.yaml"\nprintf "REVIEW_FAKE_TOKEN=not-a-secret\\n" > "$p/.env"\nexit 1\n', { mode: 0o700 });
   const ws = { root, agents: join(root, "agents"), profils: join(root, "instances"), skills: join(root, "skills"), modeles: join(root, "modeles") };
-  await expect(prepareAgent({ ws: ws as never, instanceHome: inst, agentName: "Test", title: null, entreprise: "Test", binary: fake })).rejects.toThrow(/clone du profil « test » en échec/);
+  await expect(prepareAgent({ owner: OWN, ws: ws as never, instanceHome: inst, agentName: "Test", title: null, entreprise: "Test", binary: fake })).rejects.toThrow(/clone du profil « test » en échec/);
   const home = join(inst, "profiles", "test");
   expect(await readFile(join(home, ".env"), "utf8")).not.toContain("REVIEW_FAKE_TOKEN");
   expect(await readFile(join(home, ".env"), "utf8")).toBe(EMPTY_ENV);
@@ -114,7 +117,7 @@ it("sonde n°4 inversée : un clone partiel en échec NE LAISSE PAS le marqueur 
   expect(await stat(preparingFile(inst, "test"))).toBeTruthy(); // état conservé : inutilisable
   expect(await profileUsability(inst, "test")).toMatch(/inutilisable/);
   // reprise : le clone n'est plus nécessaire (config.yaml présent) → nettoyage terminé, utilisable
-  await prepareAgent({ ws: ws as never, instanceHome: inst, agentName: "Test", binary: "/bin/false" });
+  await prepareAgent({ owner: OWN, ws: ws as never, instanceHome: inst, agentName: "Test", binary: "/bin/false" });
   expect(await profileUsability(inst, "test")).toBeNull();
   await expect(stat(preparingFile(inst, "test"))).rejects.toThrow();
 });

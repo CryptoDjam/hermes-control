@@ -1,5 +1,11 @@
 # Changelog
 
+## Lot B — identities (PROTOTYPE on branch `lot-b-identites`, 2026-10-08; not merged, not published, not deployed)
+C2 of Codex's coherence review (two homonymous agents sharing one business folder and memory). *Coded* and *tested* (unit tests + isolated bwrap run with a simulated Paperclip API); not run in a Paperclip server.
+1. **Short term — one owner per business folder** (`src/proprietaire.ts`, `prepareAgent`): `owner` (companyId, agentId) is now required; the folder is created atomically with `.hermes-control/proprietaire.json`; an existing folder owned by another identity, or **without a recorded owner**, is refused before anything is created (no automatic adoption: migration inventory). Foreign links refused (folder, sub-folders, profile `memories`, `journal`, profile reached through a link) and never followed or replaced.
+2. **Target — reads the pack's projection** (`src/identites.ts`, `src/prepare-identite.ts`, `readAssignments`): with `<ws>/donnees/identites.json`, profiles are `donnees/h/<i>/profiles/<a>` and data `donnees/e/<e>/a/<a>`; refusals: invalid projection, missing alias, company mismatch, retired/unassigned agent, competing `assignments.json` (companies/agents), assignment writes from HC.
+3. **T16 before creation**: `prepareAgent`/`prepareByIdentity` measure the literal `HERMES_HOME` (administered execution root included) before the lock, the profile clone or any folder; `bot-desktop/rfb.sock` added to the expected sockets (launch check and diagnostics).
+
 ## 0.6.3 — 2026-10-07 (not published — ACCEPTANCE TEST ONLY; deployment not authorized)
 **Status: acceptance build.** Integrates the « voie 1 » chosen after lot C (local patches of two Paperclip dependencies) and the corrections requested by Codex (07/10, 11:03). For each point: *coded* / *tested* here; acceptance results are in the 0.6.3 reports, not here.
 

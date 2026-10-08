@@ -31,6 +31,8 @@ import { type HermesBinarySpec, describeBinary, verifyHermesBinary } from "./bin
 import { type ReferenceInfo, describeReference, referenceInfo } from "./reference.js";
 import { type AgentState, type ProfileHealth, agentState, checkProfile } from "./health.js";
 import { prepareAgent, profileUsability } from "./prepare.js";
+import { prepareByIdentity } from "./prepare-identite.js";
+import { projectionMode } from "./identites.js";
 import { assertGatewayFree, setTelegramToken, startGateway, telegramConfigured } from "./telegram.js";
 import { exists, readWorkspace } from "./workspace.js";
 import { type Desired, desiredFromAdapterConfig, syncProfile, unreadableConfigError } from "./sync.js";
@@ -422,6 +424,19 @@ const plugin = definePlugin({
       const agentId = String(params["agentId"] ?? "");
       const { snap, a } = await agentOf(companyId, agentId);
       const ws = await readWorkspace();
+      if (ws && (await projectionMode(ws))) {
+        // lot B (prototype) : identité, alias, instance et dossiers viennent de la projection du pack ; rien n'est affecté ici
+        const name = await companyName(companyId);
+        const asked = String(params["instanceHome"] ?? "").trim() || undefined;
+        const r = await prepareByIdentity({ ws, companyId, agentId, title: a.title, entreprise: name, askedInstance: asked, binaryFor: async (table, inst) => {
+          const bin = await execFor(table, inst);
+          if (!bin.exec) throw new Error(`préparation refusée : binaire Hermes refusé : ${bin.error}`);
+          return bin.exec;
+        } });
+        log.info("agent préparé (projection)", { agent: a.agentName, alias: `${r.identity.companyAlias}/${r.identity.agentAlias}`, instance: r.identity.instanceAlias, created: r.created.length, warnings: r.warnings, by });
+        await syncAll(snap, await instances(true));
+        return { created: r.created, warnings: r.warnings };
+      }
       if (!ws || !(await exists(ws.profils))) throw new Error("pas de dossier de travail (~/.config/hermes-control/workspace) ou son dossier hermes/profils n'existe pas");
       const roots = await knownRoots();
       const read = await readAssignments({ roots });
@@ -445,7 +460,8 @@ const plugin = definePlugin({
       const name = await companyName(companyId);
       const bin = await execFor(read.table, c.real);
       if (!bin.exec) throw new Error(`préparation refusée : binaire Hermes refusé : ${bin.error}`);
-      const r = await prepareAgent({ ws, instanceHome: c.real, agentName: a.agentName, title: a.title, binary: bin.exec, entreprise: name });
+      // lot B : propriétaire du dossier métier = cette identité ; T16 mesuré sur le HERMES_HOME littéral (racine d'exécution)
+      const r = await prepareAgent({ ws, instanceHome: c.real, agentName: a.agentName, title: a.title, binary: bin.exec, entreprise: name, owner: { companyId, agentId }, executionHome: executionOf(read.table, { instanceHome: c.real, profile: s }).home });
       if (!current) await assignAgent({ agentId, companyId, companyName: name, instanceHome: c.real, profile: s, name: a.agentName, assignedBy: by }, { roots });
       log.info("agent préparé", { agent: a.agentName, profile: `${instanceNameFromHome(c.real)}/${r.profile}`, created: r.created.length, warnings: r.warnings, by });
       const sync = await syncAll(snap, await instances(true));

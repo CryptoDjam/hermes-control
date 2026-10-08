@@ -94,15 +94,39 @@ async function socketsIn(dir: string, prefix: string): Promise<string[]> {
   return out;
 }
 
+/**
+ * Suffixes des sockets que Hermes 0.21.5 lie sous HERMES_HOME (relevé du pack, étape B) : passerelle, témoin du watchdog
+ * (PID au pire), et `bot-desktop/rfb.sock` (lot B, 08/10 : ajouté ici, il manquait par rapport au pack). Côté Paperclip, le
+ * worker du plugin communique par un canal IPC hérité (`fork`, stdio « ipc » : paire de sockets anonyme, aucun chemin) et le
+ * bac à sable d'adapter-utils lie `proxy.sock` dans son propre dossier temporaire (contrôle de longueur à lui) : ni l'un ni
+ * l'autre ne dépend de l'enveloppe — lu dans le source de Paperclip 2026.1001.0, non observé en fonctionnement.
+ */
+export const HERMES_SOCKET_SUFFIXES = ["gateway.sock", `state/gateway.loop-tick.${WORST_CASE_PID}.sock`, "bot-desktop/rfb.sock"] as const;
+
 /** Chemins de sockets attendus pour la version épinglée, même quand aucun socket n'existe encore. */
 export function expectedSocketPaths(home: string): string[] {
-  return [join(home, "gateway.sock"), join(home, "state", `gateway.loop-tick.${WORST_CASE_PID}.sock`)];
+  return HERMES_SOCKET_SUFFIXES.map((s) => join(home, s));
+}
+
+/**
+ * Budget calculé SANS toucher au disque, sur la chaîne LITTÉRALE qui sera transmise en HERMES_HOME (celle que Hermes passe à
+ * bind()) — à utiliser AVANT la création d'un profil. La destination canonique (droits, appartenance) se vérifie à part.
+ */
+export function budgetSockets(literalHome: string): { hermesHome: string; pire: string; octets: number; limite: number; ok: boolean } {
+  const home = literalHome.replace(/\/+$/, "");
+  let pire = "";
+  for (const s of HERMES_SOCKET_SUFFIXES) {
+    const p = `${home}/${s}`;
+    if (Buffer.byteLength(p, "utf8") > Buffer.byteLength(pire, "utf8")) pire = p;
+  }
+  const octets = Buffer.byteLength(pire, "utf8");
+  return { hermesHome: home, pire, octets, limite: SOCKET_PATH_MAX, ok: octets <= SOCKET_PATH_MAX };
 }
 
 /** Mesure (en octets UTF-8) des chemins attendus + de tout *.sock présent dans home et home/state. Pure lecture. */
 export async function checkSocketPaths(home: string): Promise<SocketPathCheck> {
   const socketBase = home;
-  const sockets = [...(await socketsIn(home, "")), ...(await socketsIn(join(home, "state"), "state/"))];
+  const sockets = [...(await socketsIn(home, "")), ...(await socketsIn(join(home, "state"), "state/")), ...(await socketsIn(join(home, "bot-desktop"), "bot-desktop/"))];
   const candidates = [...expectedSocketPaths(home), ...sockets.map((f) => join(home, f))];
   let longest = candidates[0]!;
   for (const c of candidates) if (Buffer.byteLength(c, "utf8") > Buffer.byteLength(longest, "utf8")) longest = c;

@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { EMPTY_ENV, MARK_ENV_CLEANED, MARK_PREPARED, preparingFile, prepareAgent, profileUsability, withPrepareLock, writeEmptyEnv } from "./prepare.js";
 import { layout } from "./workspace.js";
 
+/** Identité Paperclip fictive (lot B : propriétaire obligatoire du dossier métier). */
+const OWN = { companyId: "c0000000-0000-4000-8000-000000000001", agentId: "a0000000-0000-4000-8000-000000000001" };
+
 let root: string;
 let fakeHermes: string;
 let savedHome: string | undefined;
@@ -27,7 +30,7 @@ echo "fake hermes: $*" >&2; exit 1
 }
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "hc-prepare-"));
+  root = await mkdtemp(join(tmpdir(), "hp-")) // court : T16 est contrôlé avant création (lot B);
   savedHome = process.env["HOME"];
   process.env["HOME"] = root;
   fakeHermes = await makeFakeHermes(root);
@@ -47,7 +50,7 @@ afterEach(() => {
 describe("prepareAgent", () => {
   it("crée le profil, les dossiers, les gabarits et les liens", async () => {
     const ws = layout(join(root, "ws"));
-    const r = await prepareAgent({ ws, instanceHome: join(ws.profils, "acme"), agentName: "Apolline M", title: "Influenceuse", binary: fakeHermes, entreprise: "ACME" });
+    const r = await prepareAgent({ owner: OWN, ws, instanceHome: join(ws.profils, "acme"), agentName: "Apolline M", title: "Influenceuse", binary: fakeHermes, entreprise: "ACME" });
     expect(r.profile).toBe("apolline-m");
     expect(r.profileHome).toBe(join(ws.profils, "acme", "profiles", "apolline-m"));
     expect(r.agentDir).toBe(join(ws.agents, "apolline-m"));
@@ -69,9 +72,9 @@ describe("prepareAgent", () => {
   it("est idempotent : un second passage ne crée rien et ne casse rien", async () => {
     const ws = layout(join(root, "ws"));
     const inst = join(ws.profils, "acme");
-    const a = await prepareAgent({ ws, instanceHome: inst, agentName: "Chef", binary: fakeHermes });
+    const a = await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Chef", binary: fakeHermes });
     await writeFile(join(a.agentDir, "memoire", "MEMORY.md"), "ma mémoire\n");
-    const b = await prepareAgent({ ws, instanceHome: inst, agentName: "Chef", binary: fakeHermes });
+    const b = await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Chef", binary: fakeHermes });
     expect(b.created).toEqual([]);
     expect(await readFile(join(a.agentDir, "memoire", "MEMORY.md"), "utf8")).toBe("ma mémoire\n");
   });
@@ -88,7 +91,7 @@ describe("prepareAgent", () => {
     await mkdir(join(ws.skills, "wiki"), { recursive: true });
     await writeFile(join(ws.skills, "wiki", "SKILL.md"), "---\nname: wiki\n---\n");
     await symlink(join(root, "autre"), join(inst, "profiles", "chef", "skills", "wiki"));
-    const r = await prepareAgent({ ws, instanceHome: inst, agentName: "Chef", binary: fakeHermes });
+    const r = await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Chef", binary: fakeHermes });
     expect(await readlink(join(r.profileHome, "skills", "rapport"))).toBe("../../../../../skills/rapport");
     expect(await readlink(join(r.profileHome, "skills", "wiki"))).toBe(join(root, "autre"));
     expect(r.warnings.join(" ")).toMatch(/wiki.*ailleurs/);
@@ -102,14 +105,14 @@ describe("prepareAgent", () => {
     await mkdir(join(inst, "profiles", "cmo", "skills"), { recursive: true });
     await writeFile(join(inst, "profiles", "cmo", "config.yaml"), "model: {}\n");
     await symlink("../../../skills/rapport", join(inst, "profiles", "cmo", "skills", "rapport")); // copié par le clone : résout vers le lien de l'instance
-    const r = await prepareAgent({ ws, instanceHome: inst, agentName: "CMO", binary: fakeHermes });
+    const r = await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "CMO", binary: fakeHermes });
     expect(r.warnings).toEqual([]);
     expect(await readlink(join(r.profileHome, "skills", "rapport"))).toBe("../../../skills/rapport");
   });
 
   it("R02a : le profil préparé a un .env vide (en-tête seul, mode 600), aucune clé héritée de l'instance", async () => {
     const ws = layout(join(root, "ws"));
-    const r = await prepareAgent({ ws, instanceHome: join(ws.profils, "acme"), agentName: "Apolline M", binary: fakeHermes });
+    const r = await prepareAgent({ owner: OWN, ws, instanceHome: join(ws.profils, "acme"), agentName: "Apolline M", binary: fakeHermes });
     const env = await readFile(join(r.profileHome, ".env"), "utf8");
     expect(env).toBe(EMPTY_ENV);
     expect(env).not.toContain("marqueur");
@@ -123,20 +126,20 @@ describe("prepareAgent", () => {
   it("R02a idempotent : marqueurs ; un profil créé par nous mais au .env non vidé est vidé au passage suivant ; un profil fait à la main est laissé", async () => {
     const ws = layout(join(root, "ws"));
     const inst = join(ws.profils, "acme");
-    const r = await prepareAgent({ ws, instanceHome: inst, agentName: "Apolline M", binary: fakeHermes });
+    const r = await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Apolline M", binary: fakeHermes });
     expect(await stat(join(r.profileHome, ".hermes-control", "prepared-by-hermes-control"))).toBeTruthy();
     expect(await stat(join(r.profileHome, ".hermes-control", "env-cleaned"))).toBeTruthy();
     // passage interrompu simulé : marqueur de vidage absent, .env avec une clé
     await rm(join(r.profileHome, ".hermes-control", "env-cleaned"));
     await writeFile(join(r.profileHome, ".env"), "OPENAI_API_KEY=marqueur\n");
-    const again = await prepareAgent({ ws, instanceHome: inst, agentName: "Apolline M", binary: fakeHermes });
+    const again = await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Apolline M", binary: fakeHermes });
     expect(await readFile(join(r.profileHome, ".env"), "utf8")).toBe(EMPTY_ENV);
     expect(again.created).toEqual([`${join(r.profileHome, ".env")} (vide)`]);
     // profil existant fait à la main (pas de marqueur) : son .env n'est pas touché
     await mkdir(join(inst, "profiles", "manuel"), { recursive: true });
     await writeFile(join(inst, "profiles", "manuel", "config.yaml"), "model: {}\n");
     await writeFile(join(inst, "profiles", "manuel", ".env"), "MA_CLE=gardee\n");
-    await prepareAgent({ ws, instanceHome: inst, agentName: "Manuel", binary: fakeHermes });
+    await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Manuel", binary: fakeHermes });
     expect(await readFile(join(inst, "profiles", "manuel", ".env"), "utf8")).toBe("MA_CLE=gardee\n");
   });
 
@@ -154,7 +157,7 @@ describe("prepareAgent", () => {
   it("verrou : deux préparations concurrentes du même agent → une seule passe, l'autre reçoit « déjà en cours », aucun doublon", async () => {
     const ws = layout(join(root, "ws"));
     const inst = join(ws.profils, "acme");
-    const run = () => prepareAgent({ ws, instanceHome: inst, agentName: "Chef", binary: fakeHermes });
+    const run = () => prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Chef", binary: fakeHermes });
     const results = await Promise.allSettled([run(), run()]);
     const ok = results.filter((r) => r.status === "fulfilled");
     const ko = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
@@ -191,7 +194,7 @@ cp "$HERMES_HOME/.hermes-control/preparing-$3.json" "$p/preparing-seen.json"
 exit 0
 `);
     await chmod(spy, 0o755);
-    const r = await prepareAgent({ ws, instanceHome: inst, agentName: "Durable", binary: spy });
+    const r = await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Durable", binary: spy });
     const seen = JSON.parse(await readFile(join(r.profileHome, "preparing-seen.json"), "utf8")) as { stage: string; pid: number; startedAt: string };
     expect(seen.stage).toBe("cloning");
     expect(seen.pid).toBe(process.pid);
@@ -212,14 +215,14 @@ exit 0
     await mkdir(join(inst, "profiles", "manuel"), { recursive: true });
     await writeFile(join(inst, "profiles", "manuel", "config.yaml"), "model: {}\n");
     await writeFile(join(inst, "profiles", "manuel", ".env"), "MA_CLE=gardee\n");
-    await expect(prepareAgent({ ws, instanceHome: inst, agentName: "Test", title: null, entreprise: "Test", binary: fake })).rejects.toThrow(/clone du profil « test » en échec.*état .*preparing-test\.json conservé : profil inutilisable/);
+    await expect(prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Test", title: null, entreprise: "Test", binary: fake })).rejects.toThrow(/clone du profil « test » en échec.*état .*preparing-test\.json conservé : profil inutilisable/);
     const home = join(inst, "profiles", "test");
     expect(await readFile(join(home, ".env"), "utf8")).toBe(EMPTY_ENV); // le marqueur factice n'y est plus
     expect(await readFile(join(home, ".env"), "utf8")).not.toContain("REVIEW_FAKE_TOKEN");
     expect(JSON.parse(await readFile(preparingFile(inst, "test"), "utf8")).stage).toBe("clone-failed");
     expect(await profileUsability(inst, "test")).toMatch(/interrompue ou en échec.*clone-failed.*inutilisable/);
     // reprise avec un clone qui marche cette fois : config.yaml déjà là → nettoyage terminé, état supprimé, profil utilisable
-    const again = await prepareAgent({ ws, instanceHome: inst, agentName: "Test", binary: fakeHermes });
+    const again = await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Test", binary: fakeHermes });
     expect(again.created.some((c) => c.endsWith(".env (vide)"))).toBe(true);
     await expect(stat(preparingFile(inst, "test"))).rejects.toThrow();
     expect(await profileUsability(inst, "test")).toBeNull();
@@ -241,7 +244,7 @@ exit 0
     await writeFile(preparingFile(inst, "tue"), JSON.stringify({ startedAt: "2026-10-06T10:00:00.000Z", pid: 4194303, stage: "cloning" }));
     expect(await profileUsability(inst, "tue")).toMatch(/interrompue.*étape cloning.*inutilisable/);
     // config.yaml présent ne suffit pas : la reprise (prepareAgent) termine le nettoyage
-    const r = await prepareAgent({ ws, instanceHome: inst, agentName: "Tue", binary: "/bin/false" }); // aucun clone nécessaire : le binaire n'est pas appelé
+    const r = await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Tue", binary: "/bin/false" }); // aucun clone nécessaire : le binaire n'est pas appelé
     expect(r.created.some((c) => c.endsWith(".env (vide)"))).toBe(true);
     expect(await readFile(join(home, ".env"), "utf8")).toBe(EMPTY_ENV);
     await expect(stat(preparingFile(inst, "tue"))).rejects.toThrow();
@@ -249,7 +252,7 @@ exit 0
     // clone jamais commencé (preparing seul, pas de dossier) : la reprise refait le clone
     await writeFile(preparingFile(inst, "jamais"), JSON.stringify({ startedAt: "x", pid: 4194303, stage: "cloning" }));
     expect(await profileUsability(inst, "jamais")).toMatch(/inutilisable/);
-    const j = await prepareAgent({ ws, instanceHome: inst, agentName: "Jamais", binary: fakeHermes });
+    const j = await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Jamais", binary: fakeHermes });
     expect(j.created.some((c) => c.startsWith("profil Hermes"))).toBe(true);
     expect(await profileUsability(inst, "jamais")).toBeNull();
   });
@@ -257,7 +260,7 @@ exit 0
   it("profileUsability : profil créé par nous sans env-cleaned → inutilisable ; profil manuel ou terminé → utilisable ; nom invalide refusé", async () => {
     const ws = layout(join(root, "ws"));
     const inst = join(ws.profils, "acme");
-    const r = await prepareAgent({ ws, instanceHome: inst, agentName: "Apolline M", binary: fakeHermes });
+    const r = await prepareAgent({ owner: OWN, ws, instanceHome: inst, agentName: "Apolline M", binary: fakeHermes });
     expect(await profileUsability(inst, "apolline-m")).toBeNull();
     await rm(join(r.profileHome, ".hermes-control", MARK_ENV_CLEANED));
     expect(await profileUsability(inst, "apolline-m")).toMatch(/sans \.env nettoyé/);
@@ -267,6 +270,6 @@ exit 0
 
   it("refuse un nom inutilisable", async () => {
     const ws = layout(join(root, "ws"));
-    await expect(prepareAgent({ ws, instanceHome: join(ws.profils, "acme"), agentName: "???", binary: fakeHermes })).rejects.toThrow(/inutilisable/);
+    await expect(prepareAgent({ owner: OWN, ws, instanceHome: join(ws.profils, "acme"), agentName: "???", binary: fakeHermes })).rejects.toThrow(/inutilisable/);
   });
 });
