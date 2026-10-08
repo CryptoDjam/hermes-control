@@ -20,6 +20,7 @@ const targets = [
   { ...node, entryPoints: ["src/worker.ts"], outfile: "dist/worker.js" },
   { ...node, entryPoints: ["src/manifest.ts"], outfile: "dist/manifest.js" },
   { ...node, entryPoints: ["src/lib.ts"], outfile: "dist/lib.js" }, // pour scripts/migrate-assignments.mjs
+  { ...node, entryPoints: ["src/suivi-cli.ts"], outfile: "dist/hermes-control-suivi.js", banner: { js: "#!/usr/bin/env node\n" + node.banner.js } }, // commande de l'opérateur (fraîcheur B)
   {
     platform: "browser",
     target: "es2022",

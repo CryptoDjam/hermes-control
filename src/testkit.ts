@@ -73,3 +73,9 @@ export async function administerBinary(binary: string): Promise<void> {
   const { setHermesBinary } = await import("./assignments.js");
   await setHermesBinary({ binary });
 }
+
+/** Tests seulement : amorçage explicite d'une enveloppe (geste de l'opérateur), sans terminal ni Hermes en cours. */
+export async function amorcerPourTest(root: string): Promise<void> {
+  const { amorcer } = await import("./suivi-operations.js");
+  await amorcer({ root, operateur: "recette", confirmation: root, env: {}, processus: async () => [] });
+}

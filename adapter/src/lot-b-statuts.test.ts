@@ -5,7 +5,9 @@
 // Refus vérifiés dans TOUS les chemins réels : bouton « Préparer » (action du worker), exécution et reprise (adaptateur),
 // skills de l'adaptateur. Données FICTIVES ; faux Hermes ; aucun serveur, aucun modèle.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { lstat, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, unlink as unlinkF, writeFile } from "node:fs/promises";
+import { REFUS_MAX_OCTETS, journaliserRefus, refusJournalFile } from "../../src/refus-journal.js";
+const rmF = (f: string) => rm(f, { recursive: true, force: true });
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestHarness } from "@paperclipai/plugin-sdk";
@@ -16,7 +18,7 @@ import { readAssignments, resolveAssignment, setHermesBinary } from "../../src/a
 import { identitesFile, readIdentites, resolveIdentity } from "../../src/identites.js";
 import { freshnessFile } from "../../src/identites-fraicheur.js";
 import { prepareByIdentity } from "../../src/prepare-identite.js";
-import { fakeCalls, makeFakeHermes, writeRoots, writeWorkspaceFile } from "../../src/testkit.js";
+import { amorcerPourTest, fakeCalls, makeFakeHermes, writeRoots, writeWorkspaceFile } from "../../src/testkit.js";
 import { layout } from "../../src/workspace.js";
 import { REFUSAL_ERROR_CODE, createServerAdapter } from "./index.js";
 
@@ -115,6 +117,7 @@ async function fixture(): Promise<{ ws: ReturnType<typeof layout>; p: P; write: 
     await writeFile(identitesFile(ws), JSON.stringify(p, null, 2));
   };
   await write(undefined, 0);
+  await amorcerPourTest(rootDir); // amorçage explicite (fraîcheur B : jamais implicite)
   await writeWorkspaceFile(rootDir);
   await writeRoots();
   await setHermesBinary({ binary: fake });
@@ -283,17 +286,17 @@ describe("projection périmée : refusée dans les chemins qui font tourner un a
   it("révision plus basse que celle déjà lue (copie ancienne) → refus ; le pack réécrit une révision supérieure → accepté", async () => {
     const f = await prepared();
     await f.write(undefined, -2); // r4 → r2
-    await expectAllRefused(f, /projection périmée : révision r2 < r4 déjà lue par Hermes Control/);
+    await expectAllRefused(f, /projection périmée : révision r2 < r4 déjà lue/);
     await f.write(undefined, 3); // r5
     await f.a.execute(runCtx([]));
     expect(f.calls).toHaveLength(2);
-    expect(JSON.parse(await readFile(freshnessFile(), "utf8"))[f.ws.root].revision).toBe(5);
+    expect(JSON.parse(await readFile(freshnessFile(), "utf8")).enveloppes[f.ws.root].revision).toBe(5);
   });
 
   it("même révision, contenu différent (écriture hors du pack) → refus", async () => {
     const f = await prepared();
     await f.write((p) => { p.agents[0]!["name"] = "Chef modifié à la main"; }, 0);
-    await expectAllRefused(f, /projection incohérente : révision r4 déjà lue avec un autre contenu/);
+    await expectAllRefused(f, /projection périmée : révision r4 déjà lue avec un autre contenu/);
   });
 
   it("compteur d'alias en recul (un alias pourrait être réattribué) → refus", async () => {
@@ -311,5 +314,85 @@ describe("projection périmée : refusée dans les chemins qui font tourner un a
     await f.a.execute(runCtx([]));
     expect((await stat(identitesFile(f.ws))).mtimeMs).toBe(st.mtimeMs);
     expect(freshnessFile().startsWith(join(root, ".config", "hermes-control"))).toBe(true);
+  });
+});
+
+/* ---------- 4. contrat versionné identite_inactive (fraîcheur B) ---------- */
+
+describe("contrat identite_inactive (schéma 1) dans resultJson : cause structurée, champs Paperclip inchangés", () => {
+  type Id = { schema: number; code: string; cause: string; regle: string | null; agentId: string | null; companyId: string | null; empreinte: string | null; revision: number | null };
+  async function refused(agentId = AG1) {
+    const { a } = spyAdapter();
+    const logs: string[] = [];
+    const ctx = runCtx(logs) as unknown as { agent: { id: string } };
+    ctx.agent.id = agentId;
+    const r = (await a.execute(ctx as never)) as Res;
+    expect(r.errorCode).toBe(REFUSAL_ERROR_CODE);
+    const ci = r.resultJson?.["configurationIncomplete"] as { reason: string; fingerprint: string; missingBindings: unknown[]; message: string; identite?: Id };
+    const hc = r.resultJson?.["hermesControl"] as { refused: boolean; kind: string; identite?: Id };
+    expect(ci.missingBindings).toEqual([]);
+    expect(ci.message).toBe(r.errorMessage);
+    expect(hc.identite).toEqual(ci.identite);
+    return { ci, hc, logs };
+  }
+  const statuts: [string, (p: P) => void, string][] = [
+    ["agent absent", (p) => { p.agents[0]!["statut"] = "absent"; }, "agent_absent"],
+    ["agent retiré", (p) => { p.agents[0]!["statut"] = "retire"; delete p.agents[0]!["instanceAlias"]; }, "agent_retire"],
+    ["entreprise absente", (p) => { p.companies[0]!["statut"] = "absent"; }, "entreprise_absente"],
+    ["entreprise retirée", (p) => { p.companies[0]!["statut"] = "retire"; }, "entreprise_retiree"],
+  ];
+  for (const [name, mod, cause] of statuts) {
+    it(`${name} → cause ${cause} ; reason/fingerprint d'avant (hermes_control_inactive)`, async () => {
+      const f = await fixture();
+      await f.write(mod);
+      const { ci } = await refused();
+      expect(ci.reason).toBe("hermes_control_inactive");
+      expect(ci.fingerprint).toBe(`hermes_control:inactive:${AG1}`);
+      expect(ci.identite).toMatchObject({ schema: 1, code: "identite_inactive", cause, regle: null, agentId: AG1, companyId: CA, revision: 5 });
+      expect(ci.identite!.empreinte).toMatch(/^[0-9a-f]{64}$/);
+    });
+  }
+  it("projection périmée ≠ agent retiré : cause projection_perimee (regle revision_inferieure), type de refus inchangé (assignment)", async () => {
+    const f = await fixture();
+    await f.write(undefined, 3); // r7 lue
+    expect((await resolveAssignment(AG1, { companyId: CA })).ok).toBeTruthy();
+    await f.write(undefined, -2); // r5
+    const { ci } = await refused();
+    expect(ci.reason).toBe("hermes_control_assignment");
+    expect(ci.identite).toMatchObject({ cause: "projection_perimee", regle: "revision_inferieure", agentId: AG1, companyId: CA, revision: 5 });
+  });
+  it("état de suivi supprimé après usage → etat_suivi_invalide ; projection invalide → projection_invalide ; jamais amorcée → suivi_non_amorce", async () => {
+    const f = await fixture();
+    await unlinkF(freshnessFile());
+    expect((await refused()).ci.identite).toMatchObject({ cause: "etat_suivi_invalide", regle: "suivi_absent_apres_usage" });
+    await unlinkF(join(f.ws.root, "donnees", ".hermes-control-suivi.json"));
+    expect((await refused()).ci.identite).toMatchObject({ cause: "suivi_non_amorce", regle: "jamais_amorce" });
+    await f.write((p) => { p.agents[0]!["statut"] = "suspendu"; });
+    expect((await refused()).ci.identite).toMatchObject({ cause: "projection_invalide", regle: "schema", empreinte: null });
+  });
+  it("agent sans entrée dans la projection → cause absente, type de refus inchangé (not_assigned)", async () => {
+    await fixture();
+    const other = "00000000-0000-4000-8000-000000000009";
+    const { ci } = await refused(other);
+    expect(ci.reason).toBe("hermes_control_not_assigned");
+    expect(ci.identite).toMatchObject({ cause: "absente", agentId: other, companyId: CA });
+  });
+  it("refus.jsonl : ligne structurée ; journal impossible (disque plein simulé) → le refus est rendu quand même ; rotation bornée ; délai borné", async () => {
+    const f = await fixture();
+    await f.write((p) => { p.agents[0]!["statut"] = "absent"; });
+    await refused();
+    const line = JSON.parse((await readFile(refusJournalFile(), "utf8")).trim().split("\n").pop()!);
+    expect(line).toMatchObject({ agentId: AG1, kind: "inactive", identite: { cause: "agent_absent" } });
+    await rmF(refusJournalFile());
+    await mkdir(refusJournalFile()); // appendFile → EISDIR, comme un disque plein
+    const { logs } = await refused();
+    expect(logs.join("")).toMatch(/journal des refus non écrit \(EISDIR\) ; le refus est rendu quand même/);
+    await rmF(refusJournalFile());
+    for (let k = 0; k < 40; k++) await journaliserRefus({ message: "x".repeat(7000) });
+    expect((await stat(`${refusJournalFile()}.1`)).size).toBeGreaterThan(0);
+    expect((await stat(refusJournalFile())).size).toBeLessThanOrEqual(REFUS_MAX_OCTETS);
+    const t0 = Date.now();
+    expect(await journaliserRefus({}, () => new Promise(() => {}))).toMatchObject({ ok: false });
+    expect(Date.now() - t0).toBeLessThan(2_000);
   });
 });

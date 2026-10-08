@@ -10,7 +10,7 @@ import { identitesFile } from "./identites.js";
 import { prepareAgent } from "./prepare.js";
 import { prepareByIdentity } from "./prepare-identite.js";
 import { OWNER_REL, readOwner } from "./proprietaire.js";
-import { fakeCalls, makeFakeHermes, writeRoots, writeWorkspaceFile } from "./testkit.js";
+import { amorcerPourTest, fakeCalls, makeFakeHermes, writeRoots, writeWorkspaceFile } from "./testkit.js";
 import { layout } from "./workspace.js";
 
 const CA = "11111111-1111-4111-8111-111111111111";
@@ -141,6 +141,7 @@ async function projectionFixture(rootDir = join(root, "Equipe")): Promise<Fix> {
     ],
   };
   await writeFile(identitesFile(ws), JSON.stringify(p, null, 2));
+  await amorcerPourTest(rootDir); // amorçage explicite (fraîcheur B : jamais implicite)
   await writeWorkspaceFile(rootDir);
   await writeRoots();
   const { setHermesBinary } = await import("./assignments.js");

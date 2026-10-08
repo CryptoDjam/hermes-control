@@ -33,6 +33,7 @@ import { ADMINISTERED_ENV, type ExecutionPlan, HermesControlRefusal, NEUTRALIZED
 import { slug } from "../../src/match.js";
 import { describeReference, referenceInfo } from "../../src/reference.js";
 import { exists, readWorkspace } from "../../src/workspace.js";
+import { journaliserRefus } from "../../src/refus-journal.js";
 import { type FailureClass, Tail, classifyFailure } from "./failure.js";
 import { managedSnapshot, reconcileIntoProfile, skillsDirProblem, snapshotForProfile } from "./skills.js";
 
@@ -104,8 +105,11 @@ function refusalResult(agent: { id?: string; name: string; companyId?: string | 
         // texte exact du refus : le commentaire que Paperclip 2026.1001.0 pose sur le ticket est FIGÉ côté serveur
         // (recovery/stranded-notice.js : « required secret/env bindings are missing ») et ne lit pas ce champ
         message,
+        // contrat versionné `identite_inactive` (src/identites.ts, schéma 1) : cause STRUCTURÉE posée par le code qui a
+        // décidé le refus ; champ ajouté, les champs ci-dessus (lus par Paperclip) et le code d'erreur sont inchangés
+        ...(refusal.identite ? { identite: refusal.identite } : {}),
       },
-      hermesControl: { refused: true, kind: refusal.kind, failureClass: "configuration" },
+      hermesControl: { refused: true, kind: refusal.kind, failureClass: "configuration", ...(refusal.identite ? { identite: refusal.identite } : {}) },
     },
   };
 }
@@ -147,6 +151,9 @@ export function createServerAdapter(base: Base = createHermesLocalServerAdapter(
         const head = e.kind === "not_assigned" ? `agent NON AFFECTÉ à un profil Hermes (ce n'est pas un secret manquant) : ${e.message}` : `refus (${e.kind}) : ${e.message}`;
         const msg = `[hermes-control] « ${c.agent.name} » : ${head}${mapErr ? ` — ${mapErr}` : ""} ; Hermes n'est pas lancé.`;
         await c.onLog?.("stderr", msg + "\n");
+        // journal local borné (refus.jsonl) : jamais bloquant, un échec est seulement signalé
+        const j = await journaliserRefus({ agentId: c.agent.id ?? null, companyId: c.agent.companyId ?? null, kind: e.kind, identite: e.identite, message: e.message });
+        if (!j.ok) await c.onLog?.("stderr", `[hermes-control] journal des refus non écrit (${j.erreur}) ; le refus est rendu quand même\n`);
         return refusalResult(c.agent, e, msg) as Awaited<ReturnType<Base["execute"]>>;
       }
       throw e; // erreur inattendue (disque, etc.) : temporaire, Paperclip peut réessayer

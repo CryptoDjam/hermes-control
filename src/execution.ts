@@ -18,7 +18,7 @@ import { type ResolvedAssignment, resolveAssignment } from "./assignments.js";
 import { type VerifiedHermesBinary, verifyHermesBinary } from "./binary.js";
 import { type SocketPathCheck, checkSocketPaths, socketPathAlert } from "./health.js";
 import { readConfigStrict } from "./hermes.js";
-import { INACTIVE } from "./identites.js";
+import { INACTIVE, type IdentiteRefus } from "./identites.js";
 import { accountHome, accountName, legacyEnvRefusal } from "./paths.js";
 import { profileUsability } from "./prepare.js";
 import { exists } from "./workspace.js";
@@ -28,10 +28,13 @@ export type RefusalKind = "reference" | "not_assigned" | "inactive" | "assignmen
 /** Refus de configuration : Paperclip ne doit pas le réessayer (rien ne changera sans un geste d'administration). */
 export class HermesControlRefusal extends Error {
   readonly kind: RefusalKind;
-  constructor(kind: RefusalKind, message: string) {
+  /** Contrat versionné `identite_inactive` (identites.ts), posé par le code qui décide le refus ; absent sinon. */
+  readonly identite: IdentiteRefus | null;
+  constructor(kind: RefusalKind, message: string, identite: IdentiteRefus | null = null) {
     super(message);
     this.name = "HermesControlRefusal";
     this.kind = kind;
+    this.identite = identite;
   }
 }
 
@@ -95,7 +98,7 @@ export async function planExecution(agent: { id?: string; name: string; companyI
   const r = await resolveAssignment(agent.id ?? "", { companyId: agent.companyId ?? null });
   if (!r.ok) {
     const kind: RefusalKind = /^non affecté/.test(r.reason) ? "not_assigned" : r.reason.startsWith(INACTIVE) ? "inactive" : /assignments\.json (invalide|corrompu|illisible)/.test(r.reason) ? "table" : "assignment";
-    throw new HermesControlRefusal(kind, r.reason);
+    throw new HermesControlRefusal(kind, r.reason, r.identite ?? null);
   }
   const rec = r.ok;
   const label = `${rec.instanceHome}${rec.profile === "default" ? " (profil default)" : `/profiles/${rec.profile}`}`;

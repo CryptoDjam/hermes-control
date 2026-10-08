@@ -102,25 +102,68 @@ function errors(x: unknown): string[] {
  * Lecture et validation de la projection. `raw` : le texte lu (empreinte pour le contrôle de fraîcheur,
  * identites-fraicheur.ts) ; ce lecteur ne garde aucun état et n'écrit rien.
  */
-export async function readIdentites(ws: Pick<Workspace, "root">): Promise<{ projection: Projection | null; error: string | null; raw?: string }> {
+export async function readIdentites(ws: Pick<Workspace, "root">): Promise<{ projection: Projection | null; error: string | null; raw?: string; regle?: "illisible" | "corrompue" | "schema" | "enveloppe" }> {
   const f = identitesFile(ws);
   let txt: string;
   try {
     txt = await readFile(f, "utf8");
   } catch (e) {
-    return { projection: null, error: `projection ${f} illisible (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})` };
+    return { projection: null, regle: "illisible", error: `projection ${f} illisible (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})` };
   }
   let x: unknown;
   try {
     x = JSON.parse(txt);
   } catch (e) {
-    return { projection: null, error: `projection ${f} corrompue (${(e as Error).message})` };
+    return { projection: null, regle: "corrompue", error: `projection ${f} corrompue (${(e as Error).message})` };
   }
   const errs = errors(x);
-  if (errs.length) return { projection: null, error: `projection ${f} invalide : ${errs.join(" ; ")}` };
+  if (errs.length) return { projection: null, regle: "schema", error: `projection ${f} invalide : ${errs.join(" ; ")}` };
   const p = x as Projection;
-  if (p.envelope.root !== ws.root) return { projection: null, error: `projection ${f} : enveloppe ${p.envelope.root} ≠ dossier de travail ${ws.root} ; refus` };
+  if (p.envelope.root !== ws.root) return { projection: null, regle: "enveloppe", error: `projection ${f} : enveloppe ${p.envelope.root} ≠ dossier de travail ${ws.root} ; refus` };
   return { projection: p, error: null, raw: txt };
+}
+
+/**
+ * CONTRAT VERSIONNÉ `identite_inactive` (schéma 1) — cause STRUCTURÉE d'un refus d'identité, posée là où le refus est
+ * décidé (jamais déduite d'une phrase). Rendu par l'adaptateur dans resultJson.configurationIncomplete.identite et
+ * resultJson.hermesControl.identite, à côté des champs que Paperclip attend (inchangés). Causes :
+ *   agent_absent | agent_retire | entreprise_absente | entreprise_retiree | statut_inconnu  — statut dans la projection
+ *   absente             — l'agent n'a pas d'entrée dans la projection (alias jamais attribué par le pack)
+ *   projection_invalide — projection illisible, tronquée, schéma ou relations incohérents, autre enveloppe
+ *   projection_perimee  — retour en arrière observé (regle : revision_inferieure, contenu_different, compteur_en_recul,
+ *                         retiree_reactivee, retiree_disparue, alias_modifie)
+ *   etat_suivi_invalide — état de suivi de HC absent après usage, tronqué, illisible, permission refusée, schéma invalide,
+ *                         marqueur d'enveloppe absent/différent, restauration en cours, écriture impossible (regle)
+ *   suivi_non_amorce    — enveloppe jamais amorcée : amorçage EXPLICITE par l'opérateur (hermes-control-suivi amorcer)
+ * Un nouveau code de cause ou un champ retiré = nouveau numéro de schéma ; un champ ajouté optionnel reste au schéma 1.
+ */
+export const IDENTITE_SCHEMA = 1 as const;
+export const CAUSES_IDENTITE = ["agent_absent", "agent_retire", "entreprise_absente", "entreprise_retiree", "statut_inconnu", "absente", "projection_invalide", "projection_perimee", "etat_suivi_invalide", "suivi_non_amorce"] as const;
+export type CauseIdentite = (typeof CAUSES_IDENTITE)[number];
+export interface IdentiteRefus {
+  schema: typeof IDENTITE_SCHEMA;
+  code: "identite_inactive";
+  cause: CauseIdentite;
+  regle: string | null; // sous-cause stable (codes ci-dessus), null pour les statuts
+  agentId: string | null;
+  companyId: string | null;
+  empreinte: string | null; // sha256 du texte de la projection lue (null si illisible)
+  revision: number | null; // révision de la projection lue (null si illisible)
+}
+
+export function identiteRefus(cause: CauseIdentite, f: { regle?: string | null; agentId?: string | null; companyId?: string | null; empreinte?: string | null; revision?: number | null } = {}): IdentiteRefus {
+  return { schema: IDENTITE_SCHEMA, code: "identite_inactive", cause, regle: f.regle ?? null, agentId: f.agentId ?? null, companyId: f.companyId ?? null, empreinte: f.empreinte ?? null, revision: f.revision ?? null };
+}
+
+/** Cause structurée d'une identité inactive (même règle que inactiveReason), null si entreprise ET agent actifs. */
+export function inactiveCause(co: Pick<PEntreprise, "statut">, a: Pick<PAgent, "statut">): CauseIdentite | null {
+  if (co.statut === "absent") return "entreprise_absente";
+  if (co.statut === "retire") return "entreprise_retiree";
+  if (co.statut !== "actif") return "statut_inconnu";
+  if (a.statut === "absent") return "agent_absent";
+  if (a.statut === "retire") return "agent_retire";
+  if (a.statut !== "actif") return "statut_inconnu";
+  return null;
 }
 
 const ETAT: Record<Statut, string> = { actif: "active", absent: "absente de la dernière liste Paperclip", retire: "retirée" };
@@ -153,16 +196,16 @@ export interface Identity {
   agentDir: string; // <ws>/donnees/e/<e>/a/<a>
 }
 
-export type IdentityResolution = { ok: Identity; reason: null } | { ok: null; reason: string };
+export type IdentityResolution = { ok: Identity; reason: null } | { ok: null; reason: string; cause?: CauseIdentite };
 
 /** Identité d'un agent pour le contexte Paperclip (companyId, agentId) ; jamais par nom. Lecture seule. */
 export function resolveIdentity(ws: Pick<Workspace, "root">, p: Projection, q: { companyId: string; agentId: string }): IdentityResolution {
   const a = p.agents.find((x) => x.agentId === q.agentId);
-  if (!a) return { ok: null, reason: `alias absent : l'agent ${q.agentId} n'a pas d'entrée dans la projection (le pack l'attribue : identites sync) ; refus` };
+  if (!a) return { ok: null, cause: "absente", reason: `alias absent : l'agent ${q.agentId} n'a pas d'entrée dans la projection (le pack l'attribue : identites sync) ; refus` };
   const co = p.companies.find((x) => x.alias === a.companyAlias)!;
   if (co.companyId !== q.companyId) return { ok: null, reason: `incohérence d'entreprise : l'agent ${q.agentId} est projeté pour l'entreprise ${co.companyId} (${co.alias}), pas pour ${q.companyId} ; refus` };
   const inactive = inactiveReason(co, a);
-  if (inactive) return { ok: null, reason: inactive };
+  if (inactive) return { ok: null, reason: inactive, cause: inactiveCause(co, a)! };
   if (!a.instanceAlias) return { ok: null, reason: `agent ${q.agentId} (${a.profileAlias}) sans affectation explicite d'instance (pack : identites affecter --agent ${q.agentId} --instance i…) ; refus` };
   return {
     ok: { companyId: co.companyId, agentId: a.agentId, companyAlias: co.alias, agentAlias: a.profileAlias, instanceAlias: a.instanceAlias, name: a.name, instanceHome: instanceDir(ws, a.instanceAlias), profile: a.profileAlias, agentDir: dataDir(ws, co.alias, a.profileAlias) },

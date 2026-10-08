@@ -27,7 +27,7 @@ import { withDirLock } from "./lock.js";
 import { accountHome, controlDir } from "./paths.js";
 import { type Projection, projectionOf, readProjection, writeProjection } from "./agents-map.js";
 import { readWorkspace } from "./workspace.js";
-import { inactiveReason, instanceDir, projectionMode } from "./identites.js";
+import { type IdentiteRefus, identiteRefus, inactiveCause, inactiveReason, instanceDir, projectionMode } from "./identites.js";
 import { readCurrentIdentites } from "./identites-fraicheur.js";
 
 export interface CompanyEntry {
@@ -75,7 +75,11 @@ export interface ReadResult {
   mode?: "table" | "projection";
   // mode projection : raison du refus de chaque agent dont l'identité est inactive (entreprise ou agent non « actif ») ;
   // l'agent est préservé (affectation visible) mais ni préparé ni lancé
-  inactive?: Record<string, { companyId: string; reason: string }>;
+  inactive?: Record<string, { companyId: string; reason: string; identite: IdentiteRefus }>;
+  // mode projection : refus de la projection ENTIÈRE (invalide, périmée, état de suivi invalide ou non amorcé), structuré
+  identite?: IdentiteRefus;
+  // mode projection : agents qui ont une entrée dans la projection (même non affectés), révision et empreinte lues
+  projection?: { revision: number; empreinte: string; agents: Record<string, string> };
 }
 
 export interface ResolvedAssignment extends AgentAssignment {
@@ -319,11 +323,13 @@ export async function readAssignments(opts: { roots?: string[] } = {}): Promise<
   if (!(await projectionMode(ws))) return { ...r, mode: "table" };
   // mode projection : la table des affectations n'est plus une source ; une table qui porte encore companies/agents
   // serait un registre concurrent → refus entier (migration à faire), jamais de fusion
-  const refuse = (error: string): ReadResult => ({ table: emptyTable(), raw: r.raw, sha256: r.sha256, exists: true, error, issues: noIssues(), mode: "projection" });
+  const refuse = (error: string, identite?: IdentiteRefus): ReadResult => ({ table: emptyTable(), raw: r.raw, sha256: r.sha256, exists: true, error, issues: noIssues(), mode: "projection", ...(identite ? { identite } : {}) });
   if (r.error) return refuse(`${r.error} (réglages d'exécution illisibles)`);
   if (Object.keys(r.table.companies).length || Object.keys(r.table.agents).length) return refuse(`registre concurrent : ${assignmentsFile()} porte encore des entreprises/agents alors que la projection ${join(ws!.root, "donnees", "identites.json")} fait foi ; retire-les (migration), rien n'est fusionné`);
-  const { projection, error } = await readCurrentIdentites(ws!);
-  if (!projection) return refuse(`${error} ; aucune affectation n'est résolue`);
+  const cur = await readCurrentIdentites(ws!);
+  if (!cur.projection) return refuse(`${cur.error} ; aucune affectation n'est résolue`, cur.refus);
+  const projection = cur.projection;
+  const empreinte = cur.sha256;
   const table: AssignmentsTable = { ...r.table, companies: {}, agents: {} };
   const real = async (p: string) => realpath(p).catch(() => p);
   for (const co of projection.companies) {
@@ -345,10 +351,12 @@ export async function readAssignments(opts: { roots?: string[] } = {}): Promise<
     const co = projection.companies.find((x) => x.alias === a.companyAlias)!;
     const why = inactiveReason(co, a);
     if (!why) continue;
-    inactive[a.agentId] = { companyId: co.companyId, reason: why };
+    inactive[a.agentId] = { companyId: co.companyId, reason: why, identite: identiteRefus(inactiveCause(co, a)!, { agentId: a.agentId, companyId: co.companyId, empreinte, revision: projection.revision }) };
     if (table.agents[a.agentId]) issues.agents[a.agentId] = why;
   }
-  return { table, raw: r.raw, sha256: r.sha256, exists: true, error: null, issues, mode: "projection", inactive };
+  const agentsVus: Record<string, string> = {};
+  for (const a of projection.agents) agentsVus[a.agentId] = projection.companies.find((x) => x.alias === a.companyAlias)!.companyId;
+  return { table, raw: r.raw, sha256: r.sha256, exists: true, error: null, issues, mode: "projection", inactive, projection: { revision: projection.revision, empreinte, agents: agentsVus } };
 }
 
 async function readTableFile(opts: { roots?: string[] }): Promise<ReadResult> {
@@ -397,7 +405,7 @@ export function executionOf(table: Pick<AssignmentsTable, "instances">, a: Pick<
  * qu'en secours quand la table est présente mais illisible pour ce lecteur ET que la projection porte son empreinte exacte.
  * `companyId` (ctx.agent.companyId) : l'affectation doit être celle de cette entreprise.
  */
-export type Resolution = { ok: ResolvedAssignment; reason: null } | { ok: null; reason: string };
+export type Resolution = { ok: ResolvedAssignment; reason: null } | { ok: null; reason: string; identite?: IdentiteRefus };
 
 export async function resolveAssignment(agentId: string, opts: { companyId?: string | null; roots?: string[] } = {}): Promise<Resolution> {
   if (!agentId) return { ok: null, reason: "agent sans identifiant" };
@@ -406,10 +414,10 @@ export async function resolveAssignment(agentId: string, opts: { companyId?: str
   let table = read.table;
   let issues = read.issues;
   let source: ResolvedAssignment["source"] = "table";
-  if (read.error && read.mode === "projection") return { ok: null, reason: read.error }; // aucun secours en mode projection
+  if (read.error && read.mode === "projection") return { ok: null, reason: read.error, ...(read.identite ? { identite: { ...read.identite, agentId, companyId: opts.companyId ?? null } } : {}) }; // aucun secours en mode projection
   const inactive = read.inactive?.[agentId];
   if (inactive && opts.companyId && inactive.companyId !== opts.companyId) return { ok: null, reason: `affectation enregistrée pour l'entreprise ${inactive.companyId}, pas pour ${opts.companyId}` };
-  if (inactive) return { ok: null, reason: inactive.reason };
+  if (inactive) return { ok: null, reason: inactive.reason, identite: inactive.identite };
   if (read.error) {
     const { projection } = await readProjection();
     if (!projection || !read.sha256 || projection.derivedFrom.sha256 !== read.sha256) return { ok: null, reason: `${read.error} ; aucune projection agents.json de secours à la même empreinte` };
@@ -420,6 +428,8 @@ export async function resolveAssignment(agentId: string, opts: { companyId?: str
     return { ok: null, reason: `${NOT_ASSIGNED} — table absente : ${assignmentsFile()}` };
   }
   const a = table.agents[agentId];
+  // mode projection, agent sans entrée : même raison et même type de refus qu'avant (non affecté), cause structurée « absente »
+  if (!a && read.projection && !(agentId in read.projection.agents)) return { ok: null, reason: `${NOT_ASSIGNED} (table : ${assignmentsFile()})`, identite: identiteRefus("absente", { agentId, companyId: opts.companyId ?? null, empreinte: read.projection.empreinte, revision: read.projection.revision }) };
   if (!a) return { ok: null, reason: `${NOT_ASSIGNED} (table : ${assignmentsFile()})` };
   const issue = issues.agents[agentId];
   if (issue) return { ok: null, reason: `affectation invalide : ${issue}` };

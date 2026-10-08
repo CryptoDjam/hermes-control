@@ -21,6 +21,9 @@
     "worker": "./dist/worker.js",
     "ui": "./dist/ui"
   },
+  "bin": {
+    "hermes-control-suivi": "./dist/hermes-control-suivi.js"
+  },
   "files": [
     "dist/**/*.js",
     "README.md",
