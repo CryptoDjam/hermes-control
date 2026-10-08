@@ -89,6 +89,19 @@ describe("amorçage explicite : jamais initialisé ≠ état perdu", () => {
     expect(await refus(root)).toMatchObject({ cause: "etat_suivi_invalide", regle: "ancien_format" });
     await expect(amorcer(op(root))).rejects.toThrow(/compteur\(s\) d'alias en recul \(a 4 < 6\)/);
   });
+
+  it("ancien format pour DEUX enveloppes : amorcer la première ne fait pas perdre les maxima de la seconde (sauvegarde commune)", async () => {
+    const x = await enveloppe("x");
+    const y = await enveloppe("y");
+    await write(x, fixture(x, 10));
+    await write(y, fixture(y, 10, 4));
+    await mkdir(join(home, ".config", "hermes-control"), { recursive: true });
+    const legacy = (r: number, a: number) => ({ revision: r, sha256: "0".repeat(64), compteurs: { e: 1, i: 1, a }, vuLe: "x" });
+    await writeFile(freshnessFile(), JSON.stringify({ [x]: legacy(9, 4), [y]: legacy(9, 6) }));
+    await amorcer(op(x));
+    expect(await refus(y)).toMatchObject({ cause: "suivi_non_amorce" });
+    await expect(amorcer(op(y))).rejects.toThrow(/a 4 < 6/);
+  });
 });
 
 describe("fraîcheur : cas de la revue Codex", () => {

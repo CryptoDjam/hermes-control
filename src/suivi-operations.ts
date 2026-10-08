@@ -26,6 +26,7 @@ import {
   controler,
   emptyMax,
   entryErrors,
+  envelopeKey,
   freshnessFile,
   inProgressFile,
   legacyEntry,
@@ -235,8 +236,13 @@ async function entreeDe(file: string, root: string): Promise<{ entry: EntreeSuiv
 async function maxFiable(root: string, minimums: Minimums): Promise<Max> {
   const m: Max = { ...emptyMax(), restaurations: 0, sources: [] };
   const fichiers: [string, string][] = [[freshnessFile(), "suivi courant"], [previousFile(), "suivi précédent (.prec)"]];
-  for (const op of await readdir(operationsDir(root)).catch(() => [] as string[])) {
-    for (const nom of ["identites-vues.json", "identites-vues.json.prec"]) fichiers.push([join(operationsDir(root), op, nom), `sauvegarde ${op}/${nom}`]);
+  // sauvegardes de TOUTES les enveloppes : l'état de suivi est commun, une sauvegarde prise pour une autre enveloppe
+  // contient aussi l'entrée de celle-ci (et l'ancien format écrasé par un amorçage voisin)
+  const base = join(operationsDir(root), "..");
+  for (const env of await readdir(base).catch(() => [] as string[])) {
+    for (const op of await readdir(join(base, env)).catch(() => [] as string[])) {
+      for (const nom of ["identites-vues.json", "identites-vues.json.prec"]) fichiers.push([join(base, env, op, nom), `sauvegarde ${env === envelopeKey(root) ? "" : `${env}/`}${op}/${nom}`]);
+    }
   }
   for (const [f, label] of fichiers) {
     const { entry, legacy } = await entreeDe(f, root);
