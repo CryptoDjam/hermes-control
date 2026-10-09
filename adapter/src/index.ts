@@ -24,7 +24,7 @@ import { createHermesLocalServerAdapter } from "@paperclipai/hermes-paperclip-ad
 import * as hermesServer from "@paperclipai/hermes-paperclip-adapter/server";
 import { join } from "node:path";
 import { discoverLight } from "../../src/discovery.js";
-import { type HermesInstance, readModelCatalogs } from "../../src/hermes.js";
+import { type HermesInstance, readModelCatalogs, readModelsDevCatalog } from "../../src/hermes.js";
 import { agentsMapError } from "../../src/agents-map.js";
 import { assignmentsFile, hermesSpecFor, readAssignments, resolveAssignment } from "../../src/assignments.js";
 import { describeBinary, verifyHermesBinary } from "../../src/binary.js";
@@ -63,22 +63,32 @@ function providerLabel(p: string): string {
   return p.split("-").map((x) => x.charAt(0).toUpperCase() + x.slice(1)).join(" ");
 }
 
-/** Modèles connus de Hermes pour les providers configurés (catalogue `provider_models_cache.json`). */
-async function hermesModels(list: HermesInstance[]): Promise<{ id: string; label: string }[]> {
+/**
+ * Modèles proposés à Paperclip (Harness/Runtime → Model) : TOUS les modèles du fournisseur connecté (10/10, point 12), le modèle
+ * courant des profils en tête. Sources, dans l'ordre : `provider_models_cache.json` (catalogue vivant écrit par Hermes), sinon
+ * `models_dev_cache.json` (repli, filtré : conversation / code seulement) ; les modèles déjà choisis dans les profils restent
+ * proposés même absents des catalogues. Rien n'est exécuté ni écrit.
+ */
+export async function hermesModels(list: HermesInstance[]): Promise<{ id: string; label: string }[]> {
   const providers = providersOf(list);
   const seen = new Set<string>();
   const out: { id: string; label: string }[] = [];
+  const ajouter = (m: string, prov: string | null) => {
+    if (!m || seen.has(m)) return;
+    seen.add(m);
+    out.push({ id: m, label: prov && providers.length > 1 ? `${m} (${prov})` : m });
+  };
+  // modèles courants d'abord (le plus utilisé en tête)
+  const courants = new Map<string, number>();
+  for (const i of list) for (const p of i.profiles) if (p.model) courants.set(p.model, (courants.get(p.model) ?? 0) + 1);
+  for (const [m] of [...courants.entries()].sort((a, b) => b[1] - a[1])) ajouter(m, null);
   for (const i of list) {
     const catalogs = await readModelCatalogs(i.home);
     for (const prov of providers.length ? providers : Object.keys(catalogs)) {
-      for (const m of catalogs[prov] ?? []) {
-        if (seen.has(m)) continue;
-        seen.add(m);
-        out.push({ id: m, label: providers.length > 1 ? `${m} (${prov})` : m });
-      }
+      const vivant = catalogs[prov] ?? [];
+      const liste = vivant.length ? vivant : await readModelsDevCatalog(i.home, prov);
+      for (const m of liste) ajouter(m, prov);
     }
-    // modèles déjà choisis dans les profils, même absents du catalogue
-    for (const p of i.profiles) if (p.model && !seen.has(p.model)) { seen.add(p.model); out.push({ id: p.model, label: p.model }); }
   }
   return out;
 }

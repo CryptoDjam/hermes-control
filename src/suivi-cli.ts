@@ -1,10 +1,13 @@
 // hermes-control-suivi — commande de l'OPÉRATEUR (jamais exposée au worker, à l'adaptateur ni à l'Assistant) :
 //   etat           [--enveloppe <dossier>]   bilan de l'état de suivi (et maximum fiable pour le pack, en JSON)
-//   amorcer        --enveloppe <dossier> --operateur <nom>
+//   amorcer        --enveloppe <dossier> --operateur <nom> [--confirmation <dossier>]
 //   restaurer      --enveloppe <dossier> --operateur <nom> [--revision-min N] [--compteurs-min e,i,a] [--sans-reference]
 //   notifications  [--rejouer] [--acquitter <id>]
 // amorcer / restaurer demandent un terminal et la saisie du chemin exact de l'enveloppe (confirmation) ; ils sont refusés
-// dans l'environnement d'un run d'agent. Code de sortie : 0 fait, 2 refusé, 1 erreur inattendue.
+// dans l'environnement d'un run d'agent. Exception (0.7.3, 10/10) : `amorcer --confirmation <dossier>` — la confirmation est
+// PORTÉE PAR L'APPELANT (l'installateur du pack lancé avec --yes, sans terminal) : elle doit être le chemin EXACT de
+// l'enveloppe, et seul l'amorçage (première fois, jamais une remise à zéro) l'accepte ; restaurer reste un geste au terminal.
+// Code de sortie : 0 fait, 2 refusé, 1 erreur inattendue.
 import { createInterface } from "node:readline/promises";
 import { freshnessFile, readSuiviFile } from "./identites-fraicheur.js";
 import { acquitter, etatNotifications, rejouer } from "./notifications.js";
@@ -72,7 +75,10 @@ export async function main(argv: string[]): Promise<number> {
       const cm = typeof o["compteurs-min"] === "string" ? o["compteurs-min"].split(",") : null;
       if (cm && (cm.length !== 3 || cm.some((x) => !/^[0-9]+$/.test(x)))) throw new OperationRefusee("refus : --compteurs-min e,i,a (trois entiers)");
       const minimums = { revision: entier(o["revision-min"], "revision-min"), ...(cm ? { e: Number(cm[0]), i: Number(cm[1]), a: Number(cm[2]) } : {}) };
-      const confirmation = await confirmer(root);
+      const portee = o["confirmation"];
+      if (portee !== undefined && cmd !== "amorcer") throw new OperationRefusee("refus : --confirmation n'existe que pour amorcer ; restaurer est un geste au terminal");
+      if (portee !== undefined && portee !== root) throw new OperationRefusee(`refus : --confirmation doit être le chemin exact de l'enveloppe (${root})`);
+      const confirmation = typeof portee === "string" ? portee : await confirmer(root);
       const b = await operer(cmd === "amorcer" ? "amorcage" : "restauration", { root, operateur, confirmation, minimums, sansReference: o["sans-reference"] === true });
       afficherBilan(b);
       return 0;

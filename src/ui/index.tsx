@@ -5,8 +5,8 @@ import React from "react";
 import { useHostContext, useHostNavigation, usePluginAction, usePluginData, usePluginToast } from "@paperclipai/plugin-sdk/ui";
 
 type Auth = "logged_in" | "logged_out" | "unknown";
-interface Profile { name: string; home: string; description: string | null; model: string | null; provider: string | null; authStatus: Auth; approvalsMode: string | null; terminalBackend: string | null; configError: string | null }
-interface Instance { name: string; home: string; dashboardUrl: string | null; profiles: Profile[]; errors24h: number; lastError: string | null }
+interface Profile { name: string; label?: string; home: string; description: string | null; model: string | null; provider: string | null; authStatus: Auth; approvalsMode: string | null; terminalBackend: string | null; configError: string | null }
+interface Instance { name: string; label?: string; section?: string | null; home: string; dashboardUrl: string | null; profiles: Profile[]; errors24h: number; lastError: string | null }
 interface Assignment { instanceHome: string; profile: string; assignedAt: string; assignedBy: string }
 interface Suggestion { instance: string; instanceHome: string; profile: string; by: "profile-name" | "description" }
 interface Sync { agentId: string; companyId: string; agentName: string; instance: string | null; profile: string | null; home: string | null; assignment: Assignment | null; suggestion: Suggestion | null; want: { provider: string | null; model: string | null; thinking: string | null }; cwd: string | null; changed: string[]; error: string | null; prepared: string[] | null; ignoredCommand?: string | null; at: string }
@@ -185,7 +185,7 @@ function Connexion({ companyId, instanceHome, authorized, onDone }: { companyId:
     <span style={{ ...S.row, gap: 8 }}>
       {data && <Dot auth={data.authStatus} />}
       {!enCours && (
-        <button style={S.btn} disabled={busy} title="hermes auth add openai-codex --type oauth sous le HERMES_HOME de l'instance : un lien et un code à ouvrir dans TON navigateur ; aucune clé API" onClick={() => void (async () => {
+        <button style={S.btn} disabled={busy} title="hermes auth add openai-codex --type oauth sous le HERMES_HOME de l'instance : un lien et un code ; le code peut être saisi depuis le téléphone ; aucune clé API" onClick={() => void (async () => {
           setBusy(true);
           try {
             const r = (await start({ companyId, instanceHome })) as { etat: EtatConnexion; url: string | null; code: string | null; message: string | null };
@@ -203,7 +203,7 @@ function Connexion({ companyId, instanceHome, authorized, onDone }: { companyId:
         <span style={{ ...S.card, padding: 10, display: "grid", gap: 6 }}>
           <strong>Connexion en attente de toi (abonnement ChatGPT)</strong>
           {url ? <span>1. Ouvre <a href={url} target="_blank" rel="noreferrer">{url}</a></span> : <span style={S.muted}>préparation du lien…</span>}
-          {code && <span>2. Entre ce code : <strong style={{ ...S.code, fontSize: 18, letterSpacing: 2 }}>{code}</strong></span>}
+          {code && <span>2. Entre ce code : <strong style={{ ...S.code, fontSize: 18, letterSpacing: 2 }}>{code}</strong> <span style={S.muted}>(le code peut être saisi depuis le téléphone : ouvre le lien sur ton téléphone si ce navigateur refuse la saisie)</span></span>}
           <span style={S.muted}>3. Connecte-toi avec ton compte ChatGPT ; cette page se met à jour toute seule (15 min au plus). Rien n'est à coller ici.</span>
           <span><button style={S.btn} onClick={() => void (async () => { try { await stop({ companyId, instanceHome }); await refresh(); } catch (err) { toast({ title: err instanceof Error ? err.message : String(err), tone: "error" }); } })()}>Annuler</button></span>
         </span>
@@ -284,7 +284,7 @@ export function HermesPage() {
       {data.instances.map((inst) => (
         <div key={inst.home} style={S.card}>
           <div style={S.row}>
-            <strong style={{ fontSize: 16 }}>{inst.name}</strong>
+            <strong style={{ fontSize: 16 }}>{inst.label ?? inst.name}</strong>
             <span style={{ ...S.muted, ...S.code }}>{inst.home}</span>
             {company?.instances.includes(inst.home) ? <span style={{ color: "#22c55e", fontSize: 12 }}>autorisée pour cette entreprise</span> : <span style={S.muted}>non autorisée pour cette entreprise</span>}
             {inst.dashboardUrl && <a href={inst.dashboardUrl} target="_blank" rel="noreferrer">tableau de bord ↗</a>}
@@ -298,7 +298,7 @@ export function HermesPage() {
                 const agents = agentsOf(p);
                 return (
                   <tr key={p.name}>
-                    <td style={S.td}><strong>{p.name}</strong></td>
+                    <td style={S.td}><strong>{p.label ?? p.name}</strong>{p.label && p.label !== p.name && <div style={{ ...S.muted, ...S.code }}>{p.name}</div>}</td>
                     <td style={S.td}>{p.description ?? <span style={S.muted}>—</span>}</td>
                     <td style={S.td}><span style={S.code}>{p.provider ?? "?"}/{p.model ?? "?"}</span></td>
                     <td style={S.td}><State state={stateOf(p, agents)} /></td>

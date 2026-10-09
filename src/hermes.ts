@@ -304,6 +304,42 @@ export async function readModelCatalogs(home: string): Promise<Record<string, st
   }
 }
 
+/**
+ * Repli (10/10, point 12) : `models_dev_cache.json` (catalogue models.dev que Hermes met en cache dans HERMES_HOME et dans les
+ * profils) quand `provider_models_cache.json` n'a pas encore été écrit par le sélecteur de Hermes. Pour `openai-codex`
+ * (abonnement ChatGPT), l'entrée « openai » ; ne sont gardés que les modèles de conversation / code (gpt-*, o1…o9, *-codex*),
+ * jamais les modèles d'images, d'audio, d'embeddings ni de recherche. Hermes v2026.9.24 n'offre pas de liste non interactive
+ * (`hermes model` est un sélecteur) : le catalogue VIVANT du compte (gpt-6-astra…) est celui que Hermes écrit lui-même dans
+ * `provider_models_cache.json` à son premier `hermes model` ; il a priorité dès qu'il existe.
+ */
+export async function readModelsDevCatalog(home: string, provider: string): Promise<string[]> {
+  const cle = provider === "openai-codex" || provider === "openai-api" ? "openai" : provider;
+  const chemins = [join(home, "models_dev_cache.json")];
+  try {
+    for (const e of await readdir(join(home, "profiles"), { withFileTypes: true })) if (e.isDirectory()) chemins.push(join(home, "profiles", e.name, "models_dev_cache.json"));
+  } catch {
+    /* pas de profils */
+  }
+  for (const f of chemins) {
+    try {
+      const raw = JSON.parse(await readFile(f, "utf8")) as Record<string, { models?: Record<string, unknown> | unknown[] }>;
+      const models = raw[cle]?.models;
+      const ids = Array.isArray(models) ? models.map((m) => (typeof m === "string" ? m : String((m as Record<string, unknown>)["id"] ?? ""))) : Object.keys(models ?? {});
+      const gardes = ids.filter((id) => /^(gpt-|o[1-9]|codex)/.test(id) && !/image|embedding|realtime|audio|tts|whisper|transcribe|search|moderation|chat-latest|instruct|davinci|babbage/.test(id));
+      if (gardes.length) return gardes.sort(compareModelIds);
+    } catch {
+      /* fichier absent ou illisible : suivant */
+    }
+  }
+  return [];
+}
+
+/** Ordre : familles les plus récentes d'abord (gpt-6 avant gpt-5.6 avant gpt-5.5…), puis variantes par nom. */
+export function compareModelIds(a: string, b: string): number {
+  const v = (s: string) => Number((/^gpt-(\d+(?:\.\d+)?)/.exec(s)?.[1] ?? /^o(\d+)/.exec(s)?.[1] ?? "0"));
+  return v(b) - v(a) || a.localeCompare(b);
+}
+
 export function instanceNameFromHome(home: string): string {
   return basename(home);
 }

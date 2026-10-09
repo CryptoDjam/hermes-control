@@ -32,7 +32,8 @@ import { type ReferenceInfo, describeReference, referenceInfo } from "./referenc
 import { type AgentState, type ProfileHealth, agentState, checkProfile } from "./health.js";
 import { prepareAgent, profileUsability } from "./prepare.js";
 import { prepareByIdentity } from "./prepare-identite.js";
-import { projectionMode } from "./identites.js";
+import { projectionMode, readIdentites } from "./identites.js";
+import { decorerInstances } from "./libelles.js";
 import { PROVIDER_ABONNEMENT, arreterConnexion, arreterToutesConnexions, attendreInvitation, demarrerConnexion, fichierAuthPorte, sessionConnexion } from "./connexion.js";
 import { assertGatewayFree, setTelegramToken, startGateway, telegramConfigured } from "./telegram.js";
 import { exists, readWorkspace } from "./workspace.js";
@@ -43,6 +44,7 @@ interface AgentLike {
   name: string;
   title?: string | null;
   status?: string;
+  role?: string | null;
   adapterType?: string;
   adapterConfig?: Record<string, unknown> | null;
 }
@@ -54,6 +56,7 @@ interface AgentSnapshot {
   agentName: string;
   title: string | null;
   status: string | null;
+  role?: string | null;
   cwd: string | null;
   command: string | null; // hermesCommand de l'agent : IGNORÉ depuis 0.6.1 (affiché seulement)
   want: Desired;
@@ -115,7 +118,7 @@ const plugin = definePlugin({
         if (a.adapterType !== "hermes_local") continue;
         const ac = a.adapterConfig ?? {};
         const command = typeof ac["hermesCommand"] === "string" && ac["hermesCommand"].trim() ? (ac["hermesCommand"] as string).trim() : null;
-        out.push({ agentId: a.id, companyId, agentName: a.name, title: a.title ?? null, status: a.status ?? null, cwd: typeof ac["cwd"] === "string" ? (ac["cwd"] as string) : null, command, want: desiredFromAdapterConfig(ac) });
+        out.push({ agentId: a.id, companyId, agentName: a.name, title: a.title ?? null, status: a.status ?? null, role: a.role ?? null, cwd: typeof ac["cwd"] === "string" ? (ac["cwd"] as string) : null, command, want: desiredFromAdapterConfig(ac) });
       }
       // l'instantané garde les agents des autres entreprises (le job 5 min n'a pas de périmètre)
       const previous = ((await ctx.state.get(SNAPSHOT_KEY)) as AgentSnapshot[] | null) ?? [];
@@ -332,7 +335,10 @@ const plugin = definePlugin({
       // alertes générales utiles à l'entreprise (table, projection, binaire, référence), sans celles des autres entreprises
       const concernsCompany = (a: string) => a.startsWith("entreprise ") && a.slice("entreprise ".length, a.indexOf(" : ")).split(", ").includes(companyId);
       const generalAlerts = alerts.filter((a) => !/^(agent|entreprise|instance) /.test(a) || [...ids].some((id) => a.includes(id)) || concernsCompany(a));
-      return { instances: visible, sync, workspace: ws, telegram, health, states, assignments, alerts: generalAlerts };
+      // libellés (10/10) : section et agents depuis la projection du pack (lue seulement), le Chef en premier, « default » = connexion de la section
+      const projLue = ws ? (await readIdentites(ws)).projection : null;
+      const instancesLibellees = decorerInstances(visible, projLue, new Map(snap.map((s) => [s.agentId, s.role])));
+      return { instances: instancesLibellees, sync, workspace: ws, telegram, health, states, assignments, alerts: generalAlerts };
     });
 
     // ---- actions de la page (utilisateur du board seulement) ----
