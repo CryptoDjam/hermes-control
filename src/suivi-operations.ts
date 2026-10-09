@@ -343,6 +343,10 @@ async function executer(type: TypeOperation, o: OperationOpts): Promise<Bilan> {
     if (cur.kind === "invalide" && cur.regle !== "ancien_format") return abandon(`refus : état de suivi invalide (${cur.why}) ; l'amorçage ne remplace jamais un état existant : utilise « restaurer »`);
     if (cur.kind === "ok" && cur.value.enveloppes[root]) return abandon("refus : enveloppe déjà amorcée ; pour la ré-ancrer après une restauration voulue, utilise « restaurer »");
     if (mk.kind !== "absent") return abandon(`refus : marqueur d'enveloppe présent (${markerFile(root)}) : l'enveloppe a déjà été suivie, ce n'est pas une première utilisation ; utilise « restaurer »`);
+    // suivi ET marqueur supprimés après usage : les autres traces (.prec, sauvegardes, marqueurs sauvegardés, bilans) prouvent
+    // que l'enveloppe a déjà été suivie ; seul l'ancien format (repris avec ses maxima) n'en est pas une
+    const traces = m.sources.filter((x) => !x.endsWith("(ancien format)") && x !== "minimums de l'opérateur");
+    if (traces.length) return abandon(`refus : l'enveloppe a déjà été suivie (traces : ${traces.join(", ")}) : ce n'est pas une première utilisation, aucune remise à zéro ; utilise « restaurer »`);
   }
   if (type === "restauration" && !m.sources.length && !op.sansReference) return abandon("refus : aucune référence fiable (ni suivi lisible, ni .prec, ni sauvegarde, ni bilan) pour cette enveloppe ; donne --revision-min / --compteurs-min relevés ailleurs (projection sauvegardée du pack, journaux), ou --sans-reference (consigné dans le bilan)");
   const ecart = controler(m, p.projection, psha);
