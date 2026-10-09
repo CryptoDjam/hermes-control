@@ -1,8 +1,11 @@
 # Hermes Control — Hermes Agent as the engine, Paperclip in charge
 
+**▶ Demo: https://www.cyberservices-ai.com/console/**  
+Website: https://www.cyberservices-ai.com
+
 > **Warning — this branch contains 0.7.0 (candidate integrating lot B): not published and not yet acceptance-tested.** From 0.7.0 the packages are named **`@cyberservices-ai/paperclip-plugin-hermes-control`** and **`@cyberservices-ai/paperclip-adapter-hermes-control`** (the plugin id `hermes-control` and the adapter type `hermes_local` are unchanged; migration from the old names: [docs/migration-0.7.0.md](docs/migration-0.7.0.md)). The last published release is **0.5.0**, under the old names (`paperclip-plugin-hermes-control@0.5.0`, `paperclip-adapter-hermes-control@0.5.0`); it does not provide the 0.6 explicit-assignment guarantees.
 
-Source: https://github.com/CyberServices-ai/hermes-control · Author: Cyril M · MIT
+Source: https://github.com/CyberServices-ai/hermes-control · Author: Cyril M · AGPL-3.0-or-later (with an additional term, section 7(b))
 
 Run your [Paperclip](https://github.com/paperclipai/paperclip) agents on [Hermes Agent](https://github.com/NousResearch/hermes-agent) **without leaving Paperclip's own agent form**. Two small pieces, one project:
 
@@ -138,7 +141,7 @@ Local install: `plugin install /abs/path/hermes-control` and `adapter install --
 Tests never touch the real reference: `vitest.setup.ts` redirects the account home to a temporary `$HOME` and fails a test that would point at the real one.
 
 ## License
-MIT © Cyril M
+From 0.7.0: **GNU AGPL-3.0-or-later** (`LICENSE`) © Cyril M, with an additional term under section 7(b) (`ADDITIONAL-TERMS.md`: the CyberServices signature frame and its « site » and « github » links stay visible in every interactive interface). The versions published up to 0.5.0 remain under the MIT licence. Third-party code bundled in `dist/` keeps its own licences (`dist/THIRD_PARTY_LICENSES.md`, `adapter/dist/THIRD_PARTY_LICENSES.md`).
 
 ## Known limitations (0.7.0 — candidate, not for production)
 

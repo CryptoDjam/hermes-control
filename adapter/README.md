@@ -18,4 +18,4 @@ Self-contained since 0.7.0: the two patched Paperclip modules (« voie 1 », `vo
 
 Pairs with the plugin `@cyberservices-ai/paperclip-plugin-hermes-control` (Paperclip → Hermes sync + instances view). Source and docs: https://github.com/CyberServices-ai/hermes-control
 
-MIT © Cyril M
+AGPL-3.0-or-later © Cyril M, with an additional term under section 7(b) (`ADDITIONAL-TERMS.md`). Versions published up to 0.5.0 (old name) remain under MIT. Bundled third-party code keeps its own licences (`dist/THIRD_PARTY_LICENSES.md`).

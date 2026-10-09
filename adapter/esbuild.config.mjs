@@ -76,6 +76,6 @@ await cp(join(HPA, "skills"), join(ICI, "dist", VENDOR_HPA, "skills"), { recursi
 const { texte, noms } = await licencesTiers(ICI, [r.metafile], ["# Modules tiers intégrés dans dist/index.js", "",
   "Généré par `esbuild.config.mjs` depuis le métafichier du build. Les deux paquets `@paperclipai/*` sont les copies corrigées",
   "« voie 1 » (base 2026.1001.0 publiée + `voie1/patches/`, provenance : `voie1/LICENCES.md`). Les modifications de Hermes Control",
-  "sont sous licence MIT (Cyril M)."]);
+  "restent sous licence MIT (Cyril M), comme les paquets qu'elles corrigent ; le reste de Hermes Control est sous AGPL-3.0-or-later."]);
 await writeFile(join(ICI, "dist", "THIRD_PARTY_LICENSES.md"), texte);
 console.log(`intégrés : ${noms.join(", ")}`);

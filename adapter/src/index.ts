@@ -19,7 +19,7 @@
 // Hermes reçoit un environnement FINAL construit par liste blanche (rien du serveur ; HOME/USER/LOGNAME du compte) ;
 // l'annulation est portée par le correctif (signal du serveur → groupe arrêté → acquittement seulement si le groupe est
 // vide). Au passage, l'adaptateur VÉRIFIE que les copies réellement chargées sont corrigées, sinon refus.
-// Auteur : Cyril M — MIT.
+// Auteur : Cyril M — AGPL-3.0-or-later (terme additionnel 7(b) : ADDITIONAL-TERMS.md).
 import { createHermesLocalServerAdapter } from "@paperclipai/hermes-paperclip-adapter";
 import * as hermesServer from "@paperclipai/hermes-paperclip-adapter/server";
 import { join } from "node:path";

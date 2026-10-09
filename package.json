@@ -3,7 +3,7 @@
   "version": "0.7.0",
   "description": "See and control your Hermes Agent instances from Paperclip: profiles, models, auth status, sessions, errors and guardrails — per agent.",
   "author": "Cyril M",
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "keywords": [
     "paperclip",
@@ -29,6 +29,7 @@
     "dist/THIRD_PARTY_LICENSES.md",
     "README.md",
     "LICENSE",
+    "ADDITIONAL-TERMS.md",
     "CHANGELOG.md"
   ],
   "scripts": {

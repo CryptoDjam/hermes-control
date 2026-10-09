@@ -24,5 +24,6 @@ Correctifs (`patches/`), produits par `env-prototypes/voie1-amont/fabriquer.sh` 
   copie de `env-prototypes/commun/env-final.mjs`) ; refus si la copie d'`adapter-utils` chargée n'est pas corrigée ;
   annulation par `signal` et acquittement seulement si le groupe a disparu ; marqueurs exportés par `./server`.
 
-Les modifications ajoutées sont sous licence MIT (Hermes Control, Cyril M). `fabriquer.sh` reconstruit les archives depuis
+Les modifications ajoutées restent sous licence MIT (Hermes Control, Cyril M), comme les paquets qu'elles corrigent (choix
+du 09/10 : correctifs reversables en amont) ; le reste de Hermes Control est sous AGPL-3.0-or-later depuis 0.7.0. `fabriquer.sh` reconstruit les archives depuis
 les archives publiées et échoue explicitement si la base ne correspond plus (intégrité, empreintes, application exacte).

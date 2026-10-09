@@ -5,7 +5,7 @@
 **Author**: Cyril M (npm: cyberservices-ai · GitHub: CyberServices-ai)
 **Repository**: https://github.com/CyberServices-ai/hermes-control
 **Categories**: automation, ui
-**License**: MIT
+**License**: AGPL-3.0-or-later, with an additional term under section 7(b) (`ADDITIONAL-TERMS.md`); versions up to 0.5.0: MIT
 
 **Short description** (≤ 160 chars):
 Run Paperclip agents on Hermes Agent, Paperclip in charge: the agent name picks its Hermes profile; Provider/Model menus list what Hermes knows.

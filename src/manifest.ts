@@ -1,4 +1,4 @@
-// Manifeste du plugin Paperclip « Hermes Control » — auteur : Cyril M (MIT).
+// Manifeste du plugin Paperclip « Hermes Control » — auteur : Cyril M (AGPL-3.0-or-later, terme additionnel 7(b) : ADDITIONAL-TERMS.md).
 // Déclaré statiquement : capacités visibles à l'installation, emplacements d'interface, config.
 
 const manifest = {

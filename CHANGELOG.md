@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0 — candidate B′ additions (2026-10-09; not published, not deployed)
+1. **License changed to AGPL-3.0-or-later** (decision of Cyril M, 2026-10-08), with an additional term under section 7(b) (`ADDITIONAL-TERMS.md`, English and French, not yet reviewed by a lawyer): the CyberServices signature frame and its « site » and « github » links stay visible in every interactive interface. `LICENSE` (official AGPL-3.0 text) and `ADDITIONAL-TERMS.md` at the root and in `adapter/`, shipped in both packages (`files`); `"license": "AGPL-3.0-or-later"` in both `package.json`. Versions published up to 0.5.0 remain under MIT. The « voie 1 » patches to the two Paperclip packages stay under MIT like the packages they patch; bundled third-party code keeps its own licences (`THIRD_PARTY_LICENSES.md`, regenerated at build). README: demo link first, website below.
+2. **Durable acknowledgement receipts** for the local event queue (Codex review of 2026-10-08 §5): one receipt per event linked to the kept restoration report (path + SHA-256), written after the delivery is confirmed, never trimmed; event → ticket relation kept by the consumer (`livrer`), so a resume after a delivery without receipt never creates a second ticket; the active queue stays bounded and its overflow is visible. Wording: « événement enregistré, notification en attente » until a receipt exists (never « Chef informé »).
+3. **Explicit bootstrap** tests: fresh install, repeated `amorcer`, tracking deleted or truncated after use: refused, state unchanged, no silent reset.
+
 ## 0.7.0 — 2026-10-08 (not published — candidate for the pack's candidate B; not acceptance-tested in Paperclip, not deployed)
 **Status: release candidate integrating lot B** (branch `hc-0.7.0` = `lot-b-fraicheur` d017960 + clean build script 6332936 + this release). Lot B (identities, statuses, freshness, controlled restoration, versioned `identite_inactive` refusal — see the « Lot B » entry below) ships for the first time in a versioned release.
 
