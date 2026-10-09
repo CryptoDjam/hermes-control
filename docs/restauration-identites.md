@@ -10,7 +10,7 @@ Branche `lot-b-fraicheur` (prototype, non fusionné, non publié). Suite de la r
 | État de suivi `<compte>/.config/hermes-control/identites-vues.json` (+ `.prec`) | HC | HC seul | HC, `hermes-control-suivi etat` |
 | Marqueur `<enveloppe>/donnees/.hermes-control-suivi.json` | HC | HC seul | HC |
 | Sauvegardes et bilans `<compte>/.config/hermes-control/restaurations/<clé>/<opération>/` | HC | HC seul | opérateur, pack |
-| File `<compte>/.config/hermes-control/notifications/` | HC | HC (événements), notifier (acquittements) | futur notifier → Chef, opérateur |
+| File `<compte>/.config/hermes-control/notifications/` (`file.jsonl` active bornée, `recus/` un reçu durable par événement, `etat.json` pertes et compteurs) | HC | HC (événements, reçus écrits après confirmation du consommateur), opérateur (acquittement = reçu « operateur ») | futur notifier (relation persistante événement → ticket de son côté), opérateur |
 
 **La restauration est donc partagée.** Le pack restaure la projection, parce qu'il est le seul à pouvoir la réécrire et à pouvoir réconcilier avec Paperclip. HC re-scelle son propre suivi, parce que lui seul peut l'écrire. Aucun des deux n'écrit dans les fichiers de l'autre. Le seul geste croisé est la prise du verrou de la projection pendant l'opération HC, au même format que celui du pack.
 
@@ -30,7 +30,8 @@ Branche `lot-b-fraicheur` (prototype, non fusionné, non publié). Suite de la r
   7. HC écrit un nouveau marqueur, puis le suivi de **cette** enveloppe : alias et retirés réunis, compteurs au maximum. Les autres enveloppes ne changent pas.
   8. HC écrit le bilan avant/après dans `bilan.json` et l'affiche à l'opérateur. Il place un événement `restauration` dans la file bornée, puis supprime `en-cours.json`.
   9. **Reprise** : on relance la même commande. Elle reprend à la phase notée, sans refaire la sauvegarde ni dupliquer l'événement.
-  10. **Notification perdue** (file pleine, écriture impossible) : la restauration reste faite et prouvée par le bilan. La perte est inscrite dans `etat.json` ou dans le bilan. `hermes-control-suivi notifications --rejouer` remet l'événement dans la file.
+  10. **Notification perdue** (file pleine, écriture impossible) : la restauration reste faite et prouvée par le bilan. La perte est inscrite dans `etat.json` (avec un compteur de débordements jamais remis à zéro) ou dans le bilan. `hermes-control-suivi notifications --rejouer` remet dans la file tout événement **sans reçu** ; un événement qui a son reçu (`recus/<id>.json` : bilan et son SHA-256, source, ticket, dates) ne réapparaît jamais, quel que soit le nombre d'acquittements. Affichage : « événement enregistré, notification en attente » tant qu'aucun reçu n'existe, jamais « Chef informé ».
+  11. **Livraison** (futur notifier, `livrer(consommateur)`) : ticket existant cherché d'abord (`trouver(id)`), sinon créé (`creer`, relation événement → ticket persistée par le consommateur avant de répondre) ; le reçu est écrit seulement après cette confirmation. Une panne entre la confirmation et le reçu laisse l'événement en file : la reprise retrouve le ticket, n'en crée pas un second, puis écrit le reçu.
 - `hermes-control-suivi etat --enveloppe <dossier>` donne en JSON l'état, l'historique (avec le maximum fiable de chaque opération) et le nombre de notifications en attente ou perdues.
 
 ## 3. Ce que le pack doit fournir (à intégrer au candidat B)

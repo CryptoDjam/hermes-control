@@ -374,7 +374,7 @@ async function executer(type: TypeOperation, o: OperationOpts): Promise<Bilan> {
     await ecrireEnCours(op);
     await stop("suivi_ecrit");
   }
-  // 5. bilan après, événement pour Chef (restauration), fin
+  // 5. bilan après, événement de restauration enregistré dans la file (notification en attente : jamais « livrée » sans reçu), fin
   const apres = await etatEnveloppe(root);
   apres.operationEnCours = null;
   let evenement: Evenement | null = null;

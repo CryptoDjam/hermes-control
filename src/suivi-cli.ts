@@ -41,8 +41,8 @@ function afficherBilan(b: Bilan): void {
   if (b.apres) ligne(`  après : ${e(b.apres)}`);
   if (b.maxFiable) ligne(`  maximum fiable : r${b.maxFiable.revision} e${b.maxFiable.compteurs.e} i${b.maxFiable.compteurs.i} a${b.maxFiable.compteurs.a}, ${b.maxFiable.retires} retiré(s) ; sources : ${b.maxFiable.sources.join(", ") || "aucune"}${b.sansReference ? " ; SANS RÉFÉRENCE (choix de l'opérateur)" : ""}`);
   if (b.sauvegarde) ligne(`  sauvegarde : ${b.sauvegarde.dossier} (${b.sauvegarde.fichiers.map((f) => `${f.nom} ${f.sha256.slice(0, 12)}`).join(", ") || "aucun fichier"})`);
-  if (b.evenement) ligne(`  événement pour Chef : ${b.evenement.resume}`);
-  if (b.notification) ligne(b.notification.ecrite ? `  notification : en file locale (${b.evenement?.id}) ; notifier absent → non livrée tant qu'il ne l'a pas acquittée${b.notification.perdus.length ? ` ; PERDUES (file pleine) : ${b.notification.perdus.join(", ")}` : ""}` : `  notification NON ÉCRITE (${b.notification.erreur}) : la restauration est faite et prouvée ; rejoue avec « hermes-control-suivi notifications --rejouer »`);
+  if (b.evenement) ligne(`  événement : ${b.evenement.resume}`);
+  if (b.notification) ligne(b.notification.ecrite ? `  événement enregistré, notification en attente (${b.evenement?.id}) : aucune livraison tant qu'aucun reçu n'existe${b.notification.perdus.length ? ` ; SORTIS DE LA FILE (file pleine, rejouables depuis leur bilan) : ${b.notification.perdus.join(", ")}` : ""}` : `  événement NON ENREGISTRÉ dans la file (${b.notification.erreur}) : la restauration est faite et prouvée ; rejoue avec « hermes-control-suivi notifications --rejouer »`);
 }
 
 async function confirmer(root: string): Promise<string> {
@@ -61,7 +61,7 @@ export async function main(argv: string[]): Promise<number> {
     if (cmd === "etat") {
       const root = typeof o["enveloppe"] === "string" ? o["enveloppe"] : null;
       const s = await readSuiviFile();
-      const out = { suivi: freshnessFile(), etatGlobal: s.kind === "ok" ? "ok" : s.kind === "absent" ? "absent" : s.regle, enveloppes: s.kind === "ok" ? Object.keys(s.value.enveloppes) : [], enveloppe: root ? await etatEnveloppe(root) : null, historique: root ? (await historique(root)).map((b) => ({ id: b.id, type: b.type, resultat: b.resultat, fin: b.fin, maxFiable: b.maxFiable })) : [], notifications: await etatNotifications().then((n) => ({ enAttente: n.enAttente.length, pertes: n.pertes.length })) };
+      const out = { suivi: freshnessFile(), etatGlobal: s.kind === "ok" ? "ok" : s.kind === "absent" ? "absent" : s.regle, enveloppes: s.kind === "ok" ? Object.keys(s.value.enveloppes) : [], enveloppe: root ? await etatEnveloppe(root) : null, historique: root ? (await historique(root)).map((b) => ({ id: b.id, type: b.type, resultat: b.resultat, fin: b.fin, maxFiable: b.maxFiable })) : [], notifications: await etatNotifications().then((n) => ({ enAttente: n.enAttente.length, pertes: n.pertes.length, recus: n.recus, debordements: n.debordements })) };
       process.stdout.write(JSON.stringify(out, null, 2) + "\n"); // toujours JSON (lu par le pack : maximum fiable)
       return 0;
     }
@@ -78,10 +78,11 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     if (cmd === "notifications") {
-      if (typeof o["acquitter"] === "string") process.stdout.write(((await acquitter(o["acquitter"])) ? "acquitté" : "introuvable dans la file") + "\n");
+      if (typeof o["acquitter"] === "string") process.stdout.write(((await acquitter(o["acquitter"])) ? "acquitté : reçu durable écrit" : "introuvable dans la file") + "\n");
       if (o["rejouer"]) process.stdout.write(`rejouées : ${(await rejouer()).join(", ") || "aucune"}\n`);
       const n = await etatNotifications();
-      process.stdout.write(JSON.stringify({ enAttente: n.enAttente, pertes: n.pertes, acquittes: n.acquittes, illisibles: n.illisibles }, null, 2) + "\n");
+      process.stdout.write(`${n.enAttente.length} événement(s) enregistré(s), notification en attente ; ${n.recus} reçu(s) durable(s) ; ${n.debordements} débordement(s) de la file depuis l'origine\n`);
+      process.stdout.write(JSON.stringify({ enAttente: n.enAttente, pertes: n.pertes, recus: n.recus, acquittes: n.acquittes, debordements: n.debordements, illisibles: n.illisibles }, null, 2) + "\n");
       return 0;
     }
     process.stdout.write("hermes-control-suivi etat [--enveloppe <dossier>] | amorcer --enveloppe <dossier> --operateur <nom> | restaurer --enveloppe <dossier> --operateur <nom> [--revision-min N] [--compteurs-min e,i,a] [--sans-reference] | notifications [--rejouer] [--acquitter <id>]\n");
