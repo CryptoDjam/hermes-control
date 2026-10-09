@@ -1,7 +1,7 @@
 // Connexion d'une instance par abonnement ChatGPT (device code) : analyse de la sortie de Hermes, puis un VRAI processus
 // enfant (faux `hermes` en Python, testkit) qui imite le flux jusqu'au fichier auth.json ; échec, annulation, délai, faux
 // « Added » sans fichier ; action et données du worker.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,8 @@ import { createTestHarness } from "@paperclipai/plugin-sdk";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 import manifest from "./manifest.js";
 import plugin from "./worker.js";
-import { attendreFin, arreterConnexion, demarrerConnexion, fichierAuthPorte, lireFin, lireInvitation, oublierSessions, sansAnsi, sessionConnexion } from "./connexion.js";
+import { EventEmitter } from "node:events";
+import { DELAI_ARRET_FORCE_MS, type Spawner, arretsEnCours, attendreFin, arreterConnexion, arreterToutesConnexions, demarrerConnexion, fichierAuthPorte, lireFin, lireInvitation, oublierSessions, sansAnsi, sessionConnexion } from "./connexion.js";
 import { fakeCalls, makeFakeHermes, writeRoots } from "./testkit.js";
 import { setCompanyInstances, setHermesBinary } from "./assignments.js";
 
@@ -166,5 +167,112 @@ describe("worker : action « connect-instance » et données « connexion »", (
     const i = vue.instances.find((x) => x.home === inst)!;
     expect(i.profiles.find((p) => p.name === "default")?.authStatus).toBe("logged_in");
     expect(await readFile(join(inst, "auth.json"), "utf8")).toContain("credential_pool");
+  });
+});
+
+/** Faux enfant piloté par le test : `kill` note le signal ; `ignoreTerm` = ne se ferme que sur SIGKILL (ou jamais). */
+function fauxEnfant(opts: { ignoreTerm?: boolean; fermeSur?: NodeJS.Signals[] } = {}) {
+  const signaux: string[] = [];
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new EventEmitter(), stderr: new EventEmitter(), signaux,
+    kill: (sig: NodeJS.Signals = "SIGTERM") => {
+      signaux.push(sig);
+      const ferme = opts.fermeSur ?? (opts.ignoreTerm ? ["SIGKILL"] : ["SIGTERM", "SIGKILL"]);
+      if (ferme.includes(sig)) setImmediate(() => child.emit("close", null));
+      return true;
+    },
+  });
+  return child;
+}
+
+describe("tentatives : identité, fin idempotente, arrêt forcé borné, arrêt du worker (correction Codex 09/10)", () => {
+  let inst: string;
+  beforeEach(async () => {
+    inst = await mkdtemp(join(tmpdir(), "hc-cx-race-"));
+    oublierSessions();
+  });
+  const exec = { path: "/fixture/hermes", pathPrefix: [] as string[] };
+
+  it("annuler puis reconnecter : la place n'est libérée qu'à la fermeture effective ; la fermeture de l'ancien enfant n'écrase pas la nouvelle tentative", async () => {
+    const enfants: ReturnType<typeof fauxEnfant>[] = [];
+    const spawnFn = (() => { const c = fauxEnfant({ fermeSur: [] }); enfants.push(c); return c; }) as unknown as Spawner;
+    const a = demarrerConnexion({ instanceHome: inst, exec, spawnFn, timeoutMs: 60_000 });
+    expect(arreterConnexion(inst)).toBe(true);
+    expect(arretsEnCours()).toBe(1); // l'enfant A n'est pas encore fermé
+    const b = demarrerConnexion({ instanceHome: inst, exec, spawnFn, timeoutMs: 60_000 });
+    expect(b).not.toBe(a);
+    expect(sessionConnexion(inst)).toBe(b);
+    enfants[0]!.emit("close", null);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(sessionConnexion(inst)).toBe(b); // B reste la courante
+    expect(a.etat).toBe("annule");
+    expect(a.fin).not.toBeNull(); // A est bien terminée pour qui en garde la référence
+    expect(arretsEnCours()).toBe(0); // place libérée à l'arrêt effectif
+    expect(b.etat).toBe("en_cours");
+    enfants[1]!.emit("close", 1);
+    const fin = await attendreFin(inst, 1_000);
+    expect(fin).toBe(b);
+    expect(b.etat).toBe("echec");
+  });
+
+  it("fin idempotente : « error » puis « close » ne terminent qu'une fois (état et fin figés)", async () => {
+    let enfant!: ReturnType<typeof fauxEnfant>;
+    const spawnFn = (() => (enfant = fauxEnfant({ fermeSur: [] }))) as unknown as Spawner;
+    const s = demarrerConnexion({ instanceHome: inst, exec, spawnFn, timeoutMs: 60_000 });
+    enfant.emit("error", new Error("ENOENT"));
+    const fin = await attendreFin(inst, 1_000);
+    expect(fin?.etat).toBe("echec");
+    expect(fin?.message).toMatch(/lancement impossible/);
+    const figee = { ...s };
+    enfant.emit("close", 1);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(s).toEqual(figee); // close ignoré : ni exitCode, ni fin, ni message réécrits
+    expect(sessionConnexion(inst)).toBe(s);
+  });
+
+  it("arrêt forcé borné : SIGTERM ignoré → SIGKILL après DELAI_ARRET_FORCE_MS ; le délai dépassé force aussi", async () => {
+    vi.useFakeTimers();
+    try {
+      let enfant!: ReturnType<typeof fauxEnfant>;
+      const spawnFn = (() => (enfant = fauxEnfant({ ignoreTerm: true }))) as unknown as Spawner;
+      demarrerConnexion({ instanceHome: inst, exec, spawnFn, timeoutMs: 60_000 });
+      expect(arreterConnexion(inst)).toBe(true);
+      expect(enfant.signaux).toEqual(["SIGTERM"]);
+      await vi.advanceTimersByTimeAsync(DELAI_ARRET_FORCE_MS - 1);
+      expect(enfant.signaux).toEqual(["SIGTERM"]);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(enfant.signaux).toEqual(["SIGTERM", "SIGKILL"]);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(arretsEnCours()).toBe(0); // enfant fermé sur SIGKILL : place libérée
+      vi.useRealTimers();
+      expect((await attendreFin(inst, 1_000))?.etat).toBe("annule");
+      vi.useFakeTimers();
+      // délai de connexion dépassé : même chemin (SIGTERM puis SIGKILL borné), état « expire »
+      oublierSessions();
+      demarrerConnexion({ instanceHome: inst, exec, spawnFn, timeoutMs: 1_000 });
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(enfant.signaux).toEqual(["SIGTERM"]);
+      await vi.advanceTimersByTimeAsync(DELAI_ARRET_FORCE_MS + 10);
+      expect(enfant.signaux).toEqual(["SIGTERM", "SIGKILL"]);
+      vi.useRealTimers();
+      expect((await attendreFin(inst, 1_000))?.etat).toBe("expire");
+      expect(arretsEnCours()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("arrêt du worker : toutes les tentatives en cours sont annulées et attendues (fermeture effective)", async () => {
+    const autre = await mkdtemp(join(tmpdir(), "hc-cx-race-"));
+    const enfants: ReturnType<typeof fauxEnfant>[] = [];
+    const spawnFn = (() => { const c = fauxEnfant(); enfants.push(c); return c; }) as unknown as Spawner;
+    demarrerConnexion({ instanceHome: inst, exec, spawnFn, timeoutMs: 60_000 });
+    demarrerConnexion({ instanceHome: autre, exec, spawnFn, timeoutMs: 60_000 });
+    await arreterToutesConnexions(2_000);
+    expect(enfants.map((e) => e.signaux)).toEqual([["SIGTERM"], ["SIGTERM"]]);
+    expect(sessionConnexion(inst)?.etat).toBe("annule");
+    expect(sessionConnexion(autre)?.etat).toBe("annule");
+    expect(sessionConnexion(inst)?.message).toBe("arrêt du worker Hermes Control");
+    expect(arretsEnCours()).toBe(0);
   });
 });

@@ -33,7 +33,7 @@ import { type AgentState, type ProfileHealth, agentState, checkProfile } from ".
 import { prepareAgent, profileUsability } from "./prepare.js";
 import { prepareByIdentity } from "./prepare-identite.js";
 import { projectionMode } from "./identites.js";
-import { PROVIDER_ABONNEMENT, arreterConnexion, attendreInvitation, demarrerConnexion, fichierAuthPorte, sessionConnexion } from "./connexion.js";
+import { PROVIDER_ABONNEMENT, arreterConnexion, arreterToutesConnexions, attendreInvitation, demarrerConnexion, fichierAuthPorte, sessionConnexion } from "./connexion.js";
 import { assertGatewayFree, setTelegramToken, startGateway, telegramConfigured } from "./telegram.js";
 import { exists, readWorkspace } from "./workspace.js";
 import { type Desired, desiredFromAdapterConfig, syncProfile, unreadableConfigError } from "./sync.js";
@@ -640,6 +640,11 @@ const plugin = definePlugin({
     } catch (e) {
       return { status: "error" as const, message: `Hermes Control : sonde de santé en échec (${e instanceof Error ? e.message : String(e)})` };
     }
+  },
+
+  /** Arrêt du worker : aucune tentative de connexion (`hermes auth add`) ne survit au worker (SIGTERM, puis SIGKILL borné). */
+  async onShutdown() {
+    await arreterToutesConnexions();
   },
 });
 

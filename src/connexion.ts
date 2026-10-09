@@ -83,11 +83,40 @@ export async function fichierAuthPorte(instanceHome: string, provider = PROVIDER
   }
 }
 
-interface Vivante { session: SessionConnexion; child: ChildProcess; sortie: string; minuteur: NodeJS.Timeout; onFin: Array<() => void> }
-const sessions = new Map<string, Vivante | { session: SessionConnexion }>();
+/** Délai borné entre SIGTERM et SIGKILL quand l'enfant ne se termine pas de lui-même (annulation, délai, arrêt du worker). */
+export const DELAI_ARRET_FORCE_MS = 5_000;
+
+/**
+ * Une TENTATIVE : identité propre (`id`, jamais réutilisée) ; la map `sessions` pointe vers la tentative COURANTE de l'instance.
+ * Correction Codex 09/10 (course annulation/reconnexion) : l'état n'est écrit dans la map que si la tentative est encore la
+ * courante ; la fin est idempotente (`error` puis `close` peuvent arriver tous les deux) ; un arrêt demandé est forcé (SIGKILL)
+ * après DELAI_ARRET_FORCE_MS ; la place d'une tentative arrêtée n'est libérée (retirée de `enArret`) qu'à la fermeture effective.
+ */
+interface Vivante { id: number; session: SessionConnexion; child: ChildProcess; sortie: string; minuteur: NodeJS.Timeout; arretForce: NodeJS.Timeout | null; finie: boolean; onFin: Array<() => void> }
+const sessions = new Map<string, Vivante | { id: number; session: SessionConnexion }>();
+/** Tentatives dont l'arrêt est demandé et dont l'enfant n'est pas encore fermé (place libérée à la fermeture effective). */
+const enArret = new Set<Vivante>();
+let prochaineTentative = 0;
 
 export function sessionConnexion(instanceHome: string): SessionConnexion | null {
   return sessions.get(instanceHome)?.session ?? null;
+}
+
+/** Tentatives arrêtées dont l'enfant tourne encore (tests, diagnostic). */
+export function arretsEnCours(): number {
+  return enArret.size;
+}
+
+function forcerArret(v: Vivante): void {
+  if (v.finie) return;
+  enArret.add(v);
+  v.child.kill("SIGTERM");
+  if (!v.arretForce) {
+    v.arretForce = setTimeout(() => {
+      if (!v.finie) v.child.kill("SIGKILL");
+    }, DELAI_ARRET_FORCE_MS);
+    v.arretForce.unref?.();
+  }
 }
 
 export function arreterConnexion(instanceHome: string): boolean {
@@ -95,15 +124,32 @@ export function arreterConnexion(instanceHome: string): boolean {
   if (!v || !("child" in v) || v.session.etat !== "en_cours") return false;
   v.session.etat = "annule";
   v.session.message = "arrêt demandé depuis Paperclip";
-  v.child.kill("SIGTERM");
+  forcerArret(v);
   return true;
 }
 
-/** Attente de la fin d'une session (tests, et `connect-instance` en mode synchrone court). */
+/** Arrêt du worker : toute tentative encore en cours est annulée (SIGTERM puis SIGKILL borné) ; attend les fermetures effectives (bornées). */
+export async function arreterToutesConnexions(timeoutMs = DELAI_ARRET_FORCE_MS + 1_000): Promise<void> {
+  const attentes: Promise<unknown>[] = [];
+  for (const [home, v] of sessions) {
+    if (!("child" in v)) continue;
+    if (v.session.etat === "en_cours") {
+      v.session.etat = "annule";
+      v.session.message = "arrêt du worker Hermes Control";
+    }
+    forcerArret(v);
+    attentes.push(attendreFin(home, timeoutMs));
+  }
+  for (const v of enArret) if (!v.finie) attentes.push(new Promise<void>((res) => { const t = setTimeout(res, timeoutMs); v.onFin.push(() => { clearTimeout(t); res(); }); }));
+  await Promise.all(attentes);
+}
+
+/** Attente de la fin de la tentative courante d'une instance (tests, et `connect-instance` en mode synchrone court). */
 export function attendreFin(instanceHome: string, timeoutMs = DELAI_CONNEXION_MS): Promise<SessionConnexion | null> {
   const v = sessions.get(instanceHome);
   if (!v) return Promise.resolve(null);
-  if (!("child" in v) || v.session.etat !== "en_cours") return Promise.resolve(v.session);
+  if (!("child" in v)) return Promise.resolve(v.session); // terminée (map réécrite à la fin effective)
+  // tentative vivante (en cours, arrêt demandé ou fin en train de s'écrire) : attendre sa fin effective
   return new Promise((res) => {
     const t = setTimeout(() => res(v.session), timeoutMs);
     v.onFin.push(() => {
@@ -138,6 +184,8 @@ export interface DemarrerOptions {
 /**
  * Démarre la connexion de l'instance (une seule à la fois par instance : une session en cours est rendue telle quelle).
  * Le processus tourne jusqu'à la connexion de l'utilisateur dans son navigateur, l'échec, l'arrêt ou le délai.
+ * Une tentative annulée dont l'enfant n'est pas encore fermé n'empêche pas la suivante : elle est suivie dans `enArret`
+ * et sa fermeture n'écrit plus rien dans la map (sa tentative n'est plus la courante).
  */
 export function demarrerConnexion(o: DemarrerOptions): SessionConnexion {
   const existante = sessions.get(o.instanceHome);
@@ -151,23 +199,26 @@ export function demarrerConnexion(o: DemarrerOptions): SessionConnexion {
   const log = o.log ?? (() => undefined);
   const args = ["auth", "add", provider, "--type", "oauth", "--label", label];
   const child = spawnFn(o.exec.path, args, { env: hermesCallEnv(o.instanceHome, o.exec), cwd: o.instanceHome });
-  const vivante: Vivante = { session, child, sortie: "", minuteur: setTimeout(() => {
+  const id = ++prochaineTentative;
+  const vivante: Vivante = { id, session, child, sortie: "", arretForce: null, finie: false, onFin: [], minuteur: setTimeout(() => {
     if (session.etat === "en_cours") {
       session.etat = "expire";
       session.message = `aucune connexion après ${Math.round((o.timeoutMs ?? DELAI_CONNEXION_MS) / 60_000)} min : processus arrêté`;
-      child.kill("SIGTERM");
+      forcerArret(vivante);
     }
-  }, o.timeoutMs ?? DELAI_CONNEXION_MS), onFin: [] };
+  }, o.timeoutMs ?? DELAI_CONNEXION_MS) };
   sessions.set(o.instanceHome, vivante);
-  log("connexion de l'instance : démarrée", { instance: o.instanceHome, provider, binary: o.exec.path });
+  log("connexion de l'instance : démarrée", { instance: o.instanceHome, provider, binary: o.exec.path, tentative: id });
+  const courante = () => sessions.get(o.instanceHome)?.id === id;
   const lire = (d: Buffer) => {
+    if (vivante.finie) return;
     vivante.sortie = (vivante.sortie + d.toString()).slice(-MAX_SORTIE);
     if (!session.url || !session.code) {
       const inv = lireInvitation(vivante.sortie);
       if (inv) {
         session.url = inv.url;
         session.code = inv.code;
-        log("connexion de l'instance : invitation prête (URL et code à ouvrir par l'utilisateur)", { instance: o.instanceHome, url: inv.url });
+        log("connexion de l'instance : invitation prête (URL et code à ouvrir par l'utilisateur)", { instance: o.instanceHome, url: inv.url, tentative: id });
       }
     }
     const fin = lireFin(vivante.sortie);
@@ -178,8 +229,13 @@ export function demarrerConnexion(o: DemarrerOptions): SessionConnexion {
   };
   child.stdout?.on("data", lire);
   child.stderr?.on("data", lire);
+  // Fin IDEMPOTENTE : `error` et `close` peuvent arriver tous les deux ; la première passe décide, les suivantes ne font rien.
   const terminer = async (code: number | null) => {
+    if (vivante.finie) return;
+    vivante.finie = true;
+    enArret.delete(vivante); // place libérée à l'arrêt EFFECTIF seulement (l'enfant est fermé)
     clearTimeout(vivante.minuteur);
+    if (vivante.arretForce) clearTimeout(vivante.arretForce);
     session.exitCode = code;
     session.fin = new Date().toISOString();
     const fin = lireFin(vivante.sortie);
@@ -200,11 +256,14 @@ export function demarrerConnexion(o: DemarrerOptions): SessionConnexion {
       session.message = `Hermes a annoncé la connexion mais ${join(o.instanceHome, "auth.json")} ne porte aucun identifiant ${provider} : non connecté`;
     }
     vivante.sortie = ""; // rien de la sortie brute n'est conservé
-    log(`connexion de l'instance : ${session.etat}`, { instance: o.instanceHome, provider, exitCode: code, fichierOk: session.fichierOk, message: session.message });
-    sessions.set(o.instanceHome, { session });
+    const remplacee = !courante();
+    log(`connexion de l'instance : ${session.etat}`, { instance: o.instanceHome, provider, exitCode: code, fichierOk: session.fichierOk, message: session.message, tentative: id, remplacee });
+    // l'état n'est écrit dans la map que si cette tentative est toujours la courante : une tentative plus récente n'est jamais écrasée
+    if (!remplacee) sessions.set(o.instanceHome, { id, session });
     for (const f of vivante.onFin) f();
   };
   child.on("error", (e) => {
+    if (vivante.finie) return;
     session.etat = "echec";
     session.message = `lancement impossible : ${e.message}`;
     void terminer(null);
@@ -213,7 +272,7 @@ export function demarrerConnexion(o: DemarrerOptions): SessionConnexion {
   return session;
 }
 
-/** Tests : oublie les sessions terminées (jamais une session en cours). */
+/** Tests : oublie les sessions terminées (jamais une session en cours ni un arrêt non effectif). */
 export function oublierSessions(): void {
-  for (const [k, v] of sessions) if (v.session.etat !== "en_cours") sessions.delete(k);
+  for (const [k, v] of sessions) if (v.session.etat !== "en_cours" && !("child" in v && !v.finie)) sessions.delete(k);
 }

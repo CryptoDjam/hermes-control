@@ -41,11 +41,11 @@ function charger(pkg: string, script: string): Record<string, unknown> {
   return JSON.parse(r.stdout.trim().split("\n").pop()!);
 }
 
-describe("bundle autonome de l'adaptateur (0.7.1)", () => {
-  it("package.json : aucune dépendance d'installation, aucun `file:`, nom et version 0.7.1", async () => {
+describe("bundle autonome de l'adaptateur (0.7.2)", () => {
+  it("package.json : aucune dépendance d'installation, aucun `file:`, nom et version 0.7.2", async () => {
     const pkg = JSON.parse(await readFile(join(ADAPTER, "package.json"), "utf8"));
     expect(pkg.name).toBe("@cyberservices-ai/paperclip-adapter-hermes-control");
-    expect(pkg.version).toBe("0.7.1");
+    expect(pkg.version).toBe("0.7.2");
     expect(pkg.dependencies ?? {}).toEqual({});
     expect(pkg.optionalDependencies ?? {}).toEqual({});
     expect(pkg.peerDependencies ?? {}).toEqual({});
