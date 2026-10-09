@@ -23,7 +23,7 @@ import { instanceHomes } from "./discovery.js";
 import { type ActionScope, actionScope, adminScope, companyScope } from "./scope.js";
 import { withDirLock } from "./lock.js";
 import { controlDir, legacyEnvRefusal } from "./paths.js";
-import { type HermesExec, type HermesInstance, detectDashboards, instanceNameFromHome, profileHome, readInstance } from "./hermes.js";
+import { type HermesExec, type HermesInstance, authStatus, detectDashboards, instanceNameFromHome, parseAuthStatus, profileHome, readInstance } from "./hermes.js";
 import { matchAgent, slug } from "./match.js";
 import { projectionProblem } from "./agents-map.js";
 import { type AgentAssignment, type AssignmentsTable, type CompanyEntry, type TableIssues, assignAgent, assignmentsFile, canonicalInstance, executionHome, executionOf, expandExecutionRoot, hermesSpecFor, knownRoots, readAssignments, setCompanyInstances, setExecutionRoot, setHermesBinary, sharedInstanceDiagnostic, sharedInstances, unassignAgent } from "./assignments.js";
@@ -33,6 +33,7 @@ import { type AgentState, type ProfileHealth, agentState, checkProfile } from ".
 import { prepareAgent, profileUsability } from "./prepare.js";
 import { prepareByIdentity } from "./prepare-identite.js";
 import { projectionMode } from "./identites.js";
+import { PROVIDER_ABONNEMENT, arreterConnexion, attendreInvitation, demarrerConnexion, fichierAuthPorte, sessionConnexion } from "./connexion.js";
 import { assertGatewayFree, setTelegramToken, startGateway, telegramConfigured } from "./telegram.js";
 import { exists, readWorkspace } from "./workspace.js";
 import { type Desired, desiredFromAdapterConfig, syncProfile, unreadableConfigError } from "./sync.js";
@@ -494,6 +495,56 @@ const plugin = definePlugin({
       const v = spec ? await verifyHermesBinary(spec) : null;
       log.info("binaire Hermes administré", { instance: key ?? "global", binary: spec?.binary ?? null, by: scope.by, scope: scope.kind === "company" ? scope.companyId : "administrateur" });
       return { binary: spec?.binary ?? null, scope: key ?? "global", description: v?.ok ? describeBinary(v.ok) : null };
+    });
+
+    /**
+     * CONNEXION AU MODÈLE d'une instance (0.7.1, bouton « Connecter » de la page Hermes ; décision de Cyril M du 09/10 au soir :
+     * abonnement ChatGPT par OAuth, jamais de clé API). Instance AUTORISÉE de l'entreprise et non partagée (realpath) ; binaire
+     * administré ; `hermes auth add openai-codex --type oauth` sous le HERMES_HOME de l'instance (flux device code : aucun
+     * terminal, aucun navigateur côté serveur). Rend l'URL et le code que l'utilisateur ouvre dans SON navigateur ; l'état
+     * se relit par les données « connexion » (et la colonne Connexion de la vue : `hermes auth status`). Une connexion par
+     * instance : les profils la partagent par repli lecture seule, rien n'est copié. Journal : états et messages fixes seulement.
+     */
+    ctx.actions.register("connect-instance", async (params, actx) => {
+      const scope = companyScope(actx, params);
+      const instanceHome = String(params["instanceHome"] ?? "").trim();
+      const provider = String(params["provider"] ?? PROVIDER_ABONNEMENT).trim();
+      if (provider !== PROVIDER_ABONNEMENT) throw new Error(`connexion refusée : seul le fournisseur ${PROVIDER_ABONNEMENT} (abonnement ChatGPT, OAuth) est pris en charge ici ; une clé API ne se saisit jamais dans Paperclip pour Hermes`);
+      const real = await ownedInstance({ kind: "company", ...scope }, instanceHome, "connexion au modèle");
+      const roots = await knownRoots();
+      const read = await readAssignments({ roots });
+      if (read.error) throw new Error(`${read.error} ; aucune connexion lancée`);
+      const bin = await execFor(read.table, real);
+      if (!bin.exec) throw new Error(`connexion refusée : binaire Hermes refusé : ${bin.error}`);
+      const label = instanceNameFromHome(real).replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 40) || "instance";
+      demarrerConnexion({ instanceHome: real, exec: bin.exec, label, provider, log: (m, d) => log.info(m, { ...(d ?? {}), by: scope.by }) });
+      const s = await attendreInvitation(real);
+      return { instance: real, etat: s?.etat ?? "en_cours", url: s?.url ?? null, code: s?.code ?? null, message: s?.message ?? null };
+    });
+
+    ctx.actions.register("connect-instance-stop", async (params, actx) => {
+      const scope = companyScope(actx, params);
+      const real = await ownedInstance({ kind: "company", ...scope }, String(params["instanceHome"] ?? "").trim(), "arrêt de la connexion");
+      const stopped = arreterConnexion(real);
+      log.info("connexion de l'instance : arrêt demandé", { instance: real, stopped, by: scope.by });
+      return { instance: real, stopped };
+    });
+
+    /** État de la connexion d'une instance : session en cours ou dernière session (URL/code tant qu'elle attend), `hermes auth status`, auth.json présent. Jamais un secret. */
+    ctx.data.register("connexion", async (params) => {
+      const companyId = String(params["companyId"] ?? "");
+      const instanceHome = String(params["instanceHome"] ?? "").trim();
+      if (!companyId || !instanceHome) throw new Error("companyId et instanceHome requis");
+      const real = await ownedInstance({ kind: "company", companyId, by: "data" }, instanceHome, "lecture de la connexion");
+      const read = await readAssignments();
+      const bin = read.error ? null : (await execFor(read.table, real)).exec;
+      let statut: "logged_in" | "logged_out" | "unknown" = "unknown";
+      let statutTexte: string | null = null;
+      if (bin) {
+        statutTexte = (await authStatus(real, PROVIDER_ABONNEMENT, bin)).trim().split("\n")[0] ?? null;
+        statut = parseAuthStatus(statutTexte ?? "");
+      }
+      return { instance: real, provider: PROVIDER_ABONNEMENT, session: sessionConnexion(real), authStatus: statut, authLine: statutTexte, fichierOk: await fichierAuthPorte(real, PROVIDER_ABONNEMENT) };
     });
 
     /** Racine d'exécution littérale (courte) d'une instance AUTORISÉE de l'entreprise et non partagée : même instance (realpath) exigée. */

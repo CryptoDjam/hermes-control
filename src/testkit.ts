@@ -51,6 +51,44 @@ elif a[:2] == ["config", "set"]:
 elif a[:1] == ["chat"]:
     print("ok")
     print("session_id: fake-session-0001")
+elif a[:3] == ["auth", "add", "openai-codex"]:
+    # flux device code de Hermes v2026.9.24 (auth_codex.py:1071-1076) : URL et code en bleu ANSI, attente, puis « Added »
+    import time
+    # mode lu dans l'instance (l'environnement du processus est explicite et minimal : rien n'y passe) : ok | fail | hang | added-sans-fichier
+    try:
+        with open(os.path.join(home, ".fake-hermes-auth")) as f:
+            mode = f.read().strip() or "ok"
+    except Exception:
+        mode = "ok"
+    print("Signing in to OpenAI Codex...")
+    print("(Hermes creates its own session \u2014 won't affect Codex CLI or VS Code)\\n")
+    print("To continue, follow these steps:\\n")
+    print("  1. Open this URL in your browser:")
+    print("     \\x1b[94mhttps://auth.openai.com/codex/device\\x1b[0m\\n")
+    print("  2. Enter this code:")
+    print("     \\x1b[94mABCD-EFGH\\x1b[0m\\n")
+    print("Waiting for sign-in... (press Ctrl+C to cancel)", flush=True)
+    if mode == "hang":
+        time.sleep(600)
+    time.sleep(0.3)
+    if mode == "fail":
+        print("Login failed: Login timed out after 15 minutes.", file=sys.stderr)
+        sys.exit(1)
+    if mode == "ok":
+        with open(os.path.join(home, "auth.json"), "w") as f:
+            json.dump({"version": 1, "active_provider": "openai-codex", "credential_pool": {"openai-codex": [{"id": "c1", "label": "fake", "auth_type": "oauth", "access_token": "FAUX", "refresh_token": "FAUX", "source": "manual:device_code"}]}}, f)
+        os.chmod(os.path.join(home, "auth.json"), 0o600)
+    label = a[a.index("--label") + 1] if "--label" in a else "openai-codex-oauth-1"
+    print('Added openai-codex OAuth credential #1: "%s"' % label)
+elif a[:2] == ["auth", "status"]:
+    prov = a[2] if len(a) > 2 else "openai-codex"
+    ok = False
+    try:
+        with open(os.path.join(home, "auth.json")) as f:
+            ok = bool(json.load(f).get("credential_pool", {}).get(prov))
+    except Exception:
+        pass
+    print("%s: logged in" % prov if ok else "%s: logged out (No Codex credentials stored. Run hermes auth add openai-codex --type oauth to authenticate.)" % prov)
 sys.exit(0)
 `,
   );

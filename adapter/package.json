@@ -1,6 +1,6 @@
 {
   "name": "@cyberservices-ai/paperclip-adapter-hermes-control",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Hermes Control adapter for Paperclip: the agent runs only in the Hermes profile explicitly assigned to it (assignments table shared with the plugin), launched with the administered Hermes binary and a controlled environment; configuration refusals are not retried; Provider and Model menus list what Hermes knows; skills assigned in Paperclip are linked into that profile's skills folder. Self-contained bundle (patched Paperclip modules included, no install-time dependency). Drop-in override of the built-in hermes_local adapter.",
   "author": "Cyril M",
   "license": "AGPL-3.0-or-later",

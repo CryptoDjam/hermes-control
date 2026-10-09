@@ -146,6 +146,74 @@ function Dot({ auth }: { auth: Auth }) {
   return <span title={label} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 9, height: 9, borderRadius: 9, background: color, display: "inline-block" }} />{label}</span>;
 }
 
+
+/* ---------- Connexion au modèle d'une instance : abonnement ChatGPT (OAuth device code), bouton « Connecter » ---------- */
+type EtatConnexion = "en_cours" | "reussi" | "echec" | "annule" | "expire";
+interface SessionConnexion { etat: EtatConnexion; url: string | null; code: string | null; label: string | null; debut: string; fin: string | null; message: string | null; fichierOk: boolean | null }
+interface ConnexionData { instance: string; provider: string; session: SessionConnexion | null; authStatus: Auth; authLine: string | null; fichierOk: boolean }
+
+function Connexion({ companyId, instanceHome, authorized, onDone }: { companyId: string; instanceHome: string; authorized: boolean; onDone: () => void }) {
+  const start = usePluginAction("connect-instance");
+  const stop = usePluginAction("connect-instance-stop");
+  const toast = usePluginToast();
+  const { data, refresh } = usePluginData<ConnexionData>("connexion", { companyId, instanceHome });
+  const [busy, setBusy] = React.useState(false);
+  const [local, setLocal] = React.useState<{ url: string | null; code: string | null; etat: EtatConnexion; message: string | null } | null>(null);
+  const session = data?.session ?? null;
+  const enCours = (local?.etat === "en_cours" && !session) || session?.etat === "en_cours";
+  const prevEtat = React.useRef<EtatConnexion | null>(null);
+  // tant que la connexion attend l'utilisateur, l'état est relu toutes les 3 s ; à la fin, la vue entière est rafraîchie (colonne Connexion)
+  React.useEffect(() => {
+    if (!enCours) return;
+    const t = setInterval(() => void refresh(), 3000);
+    return () => clearInterval(t);
+  }, [enCours, refresh]);
+  React.useEffect(() => {
+    const e = session?.etat ?? null;
+    if (e && prevEtat.current === "en_cours" && e !== "en_cours") {
+      toast({ title: e === "reussi" ? "instance connectée au modèle (abonnement ChatGPT)" : `connexion ${e}${session?.message ? ` : ${session.message}` : ""}`, tone: e === "reussi" ? "success" : "error" });
+      setLocal(null);
+      onDone();
+    }
+    prevEtat.current = e;
+  }, [session?.etat, session?.message, toast, onDone]);
+  const url = session?.url ?? local?.url ?? null;
+  const code = session?.code ?? local?.code ?? null;
+  const connected = data?.authStatus === "logged_in";
+  if (!authorized) return <span style={S.muted}>connexion : instance non autorisée pour cette entreprise</span>;
+  return (
+    <span style={{ ...S.row, gap: 8 }}>
+      {data && <Dot auth={data.authStatus} />}
+      {!enCours && (
+        <button style={S.btn} disabled={busy} title="hermes auth add openai-codex --type oauth sous le HERMES_HOME de l'instance : un lien et un code à ouvrir dans TON navigateur ; aucune clé API" onClick={() => void (async () => {
+          setBusy(true);
+          try {
+            const r = (await start({ companyId, instanceHome })) as { etat: EtatConnexion; url: string | null; code: string | null; message: string | null };
+            setLocal(r);
+            if (r.etat !== "en_cours") toast({ title: `connexion ${r.etat}${r.message ? ` : ${r.message}` : ""}`, tone: r.etat === "reussi" ? "success" : "error" });
+            await refresh();
+          } catch (err) {
+            toast({ title: err instanceof Error ? err.message : String(err), tone: "error" });
+          } finally {
+            setBusy(false);
+          }
+        })()}>{busy ? "…" : connected ? "Reconnecter" : "Connecter"}</button>
+      )}
+      {enCours && (
+        <span style={{ ...S.card, padding: 10, display: "grid", gap: 6 }}>
+          <strong>Connexion en attente de toi (abonnement ChatGPT)</strong>
+          {url ? <span>1. Ouvre <a href={url} target="_blank" rel="noreferrer">{url}</a></span> : <span style={S.muted}>préparation du lien…</span>}
+          {code && <span>2. Entre ce code : <strong style={{ ...S.code, fontSize: 18, letterSpacing: 2 }}>{code}</strong></span>}
+          <span style={S.muted}>3. Connecte-toi avec ton compte ChatGPT ; cette page se met à jour toute seule (15 min au plus). Rien n'est à coller ici.</span>
+          <span><button style={S.btn} onClick={() => void (async () => { try { await stop({ companyId, instanceHome }); await refresh(); } catch (err) { toast({ title: err instanceof Error ? err.message : String(err), tone: "error" }); } })()}>Annuler</button></span>
+        </span>
+      )}
+      {!enCours && session && session.etat !== "reussi" && session.message && <span style={{ color: "#ef4444", fontSize: 12 }}>dernière tentative : {session.etat} — {session.message}</span>}
+      {data?.authLine && <span style={{ ...S.muted, ...S.code }} title="hermes auth status openai-codex">{data.authLine}</span>}
+    </span>
+  );
+}
+
 /* ---------- Barre latérale : lien vers la vue ---------- */
 export function HermesSidebar() {
   const nav = useHostNavigation();
@@ -222,6 +290,7 @@ export function HermesPage() {
             {inst.dashboardUrl && <a href={inst.dashboardUrl} target="_blank" rel="noreferrer">tableau de bord ↗</a>}
             <span style={{ marginLeft: "auto", color: inst.errors24h ? "#ef4444" : "inherit" }}>{inst.errors24h} erreur(s) 24 h</span>
           </div>
+          <div style={{ ...S.row, marginTop: 8 }}><span style={S.muted}>Connexion au modèle de l'instance (une par instance, partagée par ses profils ; abonnement ChatGPT, jamais de clé API) :</span><Connexion companyId={companyId} instanceHome={inst.home} authorized={!!company?.instances.includes(inst.home)} onDone={refresh} /></div>
           <table style={{ ...S.table, marginTop: 10 }}>
             <thead><tr><th style={S.th}>Profil</th><th style={S.th}>Description</th><th style={S.th}>Modèle</th><th style={S.th}>État</th><th style={S.th}>Connexion</th><th style={S.th}>Validations</th><th style={S.th}>Terminal</th><th style={S.th}>Agents Paperclip affectés</th><th style={S.th}>Telegram</th></tr></thead>
             <tbody>
