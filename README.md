@@ -3,7 +3,7 @@
 **▶ Demo: https://www.cyberservices-ai.com/console/**  
 Website: https://www.cyberservices-ai.com
 
-> **Warning — this branch contains 0.7.0 (candidate integrating lot B): not published and not yet acceptance-tested.** From 0.7.0 the packages are named **`@cyberservices-ai/paperclip-plugin-hermes-control`** and **`@cyberservices-ai/paperclip-adapter-hermes-control`** (the plugin id `hermes-control` and the adapter type `hermes_local` are unchanged; migration from the old names: [docs/migration-0.7.0.md](docs/migration-0.7.0.md)). The last published release is **0.5.0**, under the old names (`paperclip-plugin-hermes-control@0.5.0`, `paperclip-adapter-hermes-control@0.5.0`); it does not provide the 0.6 explicit-assignment guarantees.
+> **Current release: 0.7.3 (2026-10-10)**, in service in the pack `hermes-paperclip-pack`. From 0.7.0 the packages are named **`@cyberservices-ai/paperclip-plugin-hermes-control`** and **`@cyberservices-ai/paperclip-adapter-hermes-control`** (the plugin id `hermes-control` and the adapter type `hermes_local` are unchanged; migration from the old names: [docs/migration-0.7.0.md](docs/migration-0.7.0.md)). 0.7.3 is the first release published under these names; the last release under the old names is **0.5.0** (`paperclip-plugin-hermes-control@0.5.0`, `paperclip-adapter-hermes-control@0.5.0`), which does not provide the 0.6 explicit-assignment guarantees.
 
 Source: https://github.com/CyberServices-ai/hermes-control · Author: Cyril M · AGPL-3.0-or-later (with an additional term, section 7(b))
 

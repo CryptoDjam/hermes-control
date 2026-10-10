@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.3 — Hermes page labels, non-interactive bootstrap for the installer, full model catalogue (2026-10-10, night; not published)
+## 0.7.3 — Hermes page labels, non-interactive bootstrap for the installer, full model catalogue (2026-10-10 — released: git tag v0.7.3, npm)
 Defects seen by the Gardien and Cyril M on the real installation of 10 Oct (00 h 36) and the correction of Cyril M (point 10: the Chef runs the company, the host opens it).
 1. **Hermes page labels** (`src/libelles.ts`, `src/worker.ts`, `src/ui/index.tsx`; defect n° 6): the root profile of an instance was shown as « default » (taken for a second Chef) and the instance as « i00001 ». With the pack's projection (read only): instance « <section> (<alias>) », root line « <section> — connexion de la section », agent profiles « <agent name> (aNNNNN) », the **Chef (role ceo) first**, the other agents by alias, the section line last. Outside projection mode the disk names stay. The agent snapshot now carries `role`.
 2. **« Connecter »** (defect n° 7): the button title and the pending panel say that the code can be entered from the phone (OpenAI's device page refused the entry in the desktop browser). Browser cache (defect n° 6 bis): nothing to do in the plugin — Paperclip 2026.1001.0 already serves `/_plugins/<id>/ui/*` with `Cache-Control: public, max-age=0, must-revalidate` + ETag and the UI loads the bundle with `?v=<plugin version>`; the version bump changes the URL.
